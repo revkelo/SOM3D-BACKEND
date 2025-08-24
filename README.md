@@ -1,2 +1,2 @@
-# SOM3D-BACKEND
 
+pip install -r requirements.txt

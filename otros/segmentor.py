@@ -46,7 +46,7 @@ class DicomSegmenter:
 
 # Ejemplo de uso
 if __name__ == "__main__":
-    zip_path = "Y:/DICOM/ct-headnii.zip"
+    zip_path = "Y:/DICOM/SE1.zip"
     output_path = "C:/Users/K/Documents/GitHub/SOM3D-BACKEND/otros/ct-headnii_segmented"
 
     segmenter = DicomSegmenter(zip_path, output_path)

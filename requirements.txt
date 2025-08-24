@@ -1,0 +1,11 @@
+numpy
+nibabel
+scikit-image
+scipy
+trimesh
+open3d
+pymeshlab
+fast-simplification
+TotalSegmentator
+flasgger
+flask-cors

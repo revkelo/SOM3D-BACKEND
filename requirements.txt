@@ -10,3 +10,4 @@ TotalSegmentator
 flasgger
 flask-cors
 mysql-connector-python
+psutil

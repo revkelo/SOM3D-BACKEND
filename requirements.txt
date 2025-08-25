@@ -9,3 +9,4 @@ fast-simplification
 TotalSegmentator
 flasgger
 flask-cors
+mysql-connector-python

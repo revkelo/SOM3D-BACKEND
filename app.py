@@ -19,7 +19,7 @@ app.config['SWAGGER'] = {
 # 🔓 CORS para tu front (Live Server, etc. en 5500)
 CORS(
     app,
-    resources={r"/*": {"origins": ["http://127.0.0.1:5500", "http://localhost:5500","http://localhost:5173"]}},
+    resources={r"/*": {"origins": ["http://127.0.0.1:5500", "http://localhost:5500","http://localhost:5173","http://localhost:5000"]}},
     supports_credentials=False,
     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"]

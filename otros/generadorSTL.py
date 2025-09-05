@@ -283,8 +283,8 @@ class NiiToStlConverter:
 
 # Ejemplo de uso
 if __name__ == "__main__":
-    input_dir   = r"Y:/SALIDAS/Craneo/nii"
-    output_root = r"C:/Users/K/Documents/GitHub/SOM3D-BACKEND/otros/STL_out"
+    input_dir   = r"C:/Dicoms - SOM3D"
+    output_root = r"C:/Dicoms - SOM3D/STL's"
 
     converter = NiiToStlConverter(input_dir, output_root)
     converter.run()

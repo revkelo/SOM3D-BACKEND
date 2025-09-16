@@ -1,0 +1,11 @@
+version: "3.8"
+
+services:
+  api:
+    build: .
+    image: som3d-backend:prod
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"  # cambia a "80:8000" si quieres puerto 80
+    restart: unless-stopped

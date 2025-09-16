@@ -57,3 +57,20 @@ Puntos de salud y rutas
 Notas
 - Este repo incluía `requirements.txt` con dependencias 3D no usadas por este API. Para el backend usa `requirements-backend.txt`.
 - Si ya tienes una base MySQL externa, ajusta `DB_HOST`, `DB_PORT`, etc. y puedes omitir el servicio `db` en compose.
+
+
+para el ec2 el env
+DB_USER=tu_usuario
+DB_PASS=tu_password
+DB_HOST=tu-endpoint-rds.amazonaws.com
+DB_PORT=3306
+DB_NAME=tu_base
+JWT_SECRET=un-secreto-fuerte-y-largo
+JWT_ALG=HS256
+JWT_EXPIRE_MINUTES=60
+EPAYCO_PUBLIC_KEY=tu_public_key
+EPAYCO_TEST=false
+BASE_URL=https://api.tu-dominio.com
+P_CUST_ID_CLIENTE=tu_id_cliente
+P_KEY=tu_p_key
+USE_NGROK_SKIP=false

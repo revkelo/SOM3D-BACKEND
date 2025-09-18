@@ -129,7 +129,38 @@
 
               <!-- Ciudad / Teléfono -->
               <label class="text-sm text-gray-300">Ciudad
-                <input id="reg-ciudad" required class="mt-1 w-full py-2.5 px-3 bg-black border border-gray-700 rounded-lg" />
+                <select id="reg-ciudad" required class="mt-1 w-full py-2.5 px-3 bg-black border border-gray-700 rounded-lg bg-black">
+                  <option value="">Selecciona ciudad</option>
+                  <option value="Bogotá">Bogotá</option>
+                  <option value="Medellín">Medellín</option>
+                  <option value="Cali">Cali</option>
+                  <option value="Barranquilla">Barranquilla</option>
+                  <option value="Cartagena">Cartagena</option>
+                  <option value="Cúcuta">Cúcuta</option>
+                  <option value="Bucaramanga">Bucaramanga</option>
+                  <option value="Pereira">Pereira</option>
+                  <option value="Santa Marta">Santa Marta</option>
+                  <option value="Ibagué">Ibagué</option>
+                  <option value="Villavicencio">Villavicencio</option>
+                  <option value="Pasto">Pasto</option>
+                  <option value="Manizales">Manizales</option>
+                  <option value="Montería">Montería</option>
+                  <option value="Neiva">Neiva</option>
+                  <option value="Popayán">Popayán</option>
+                  <option value="Armenia">Armenia</option>
+                  <option value="Sincelejo">Sincelejo</option>
+                  <option value="Valledupar">Valledupar</option>
+                  <option value="Tunja">Tunja</option>
+                  <option value="Riohacha">Riohacha</option>
+                  <option value="Florencia">Florencia</option>
+                  <option value="Yopal">Yopal</option>
+                  <option value="Arauca">Arauca</option>
+                  <option value="Quibdó">Quibdó</option>
+                  <option value="Mocoa">Mocoa</option>
+                  <option value="San Andrés">San Andrés</option>
+                  <option value="Leticia">Leticia</option>
+                  <option value="Otro">Otro</option>
+                </select>
               </label>
 
               <label class="text-sm text-gray-300">Teléfono
@@ -353,6 +384,32 @@
       loginEmail.addEventListener("input", validateLoginUI);
       loginPass.addEventListener("input", validateLoginUI);
       validateLoginUI();
+
+      // Toggle mostrar/ocultar contraseña en login
+      (function addLoginPassToggle(){
+        try {
+          const inp = document.getElementById('login-password');
+          if (!inp || !inp.parentElement) return;
+          const wrap = document.createElement('div');
+          wrap.className = 'relative';
+          // Insert wrapper and move input inside
+          const parent = inp.parentElement;
+          parent.insertBefore(wrap, inp);
+          wrap.appendChild(inp);
+          inp.classList.add('pr-12');
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.id = 'toggle-login-pass';
+          btn.className = 'absolute right-2 top-1/2 -translate-y-1/2 text-xs text-gray-400 hover:text-gray-200 px-2 py-1';
+          btn.textContent = 'Ver';
+          wrap.appendChild(btn);
+          btn.addEventListener('click', () => {
+            const isPass = inp.getAttribute('type') === 'password';
+            inp.setAttribute('type', isPass ? 'text' : 'password');
+            btn.textContent = isPass ? 'Ocultar' : 'Ver';
+          });
+        } catch {}
+      })();
 
       qs("#form-login").addEventListener("submit", async (e) => {
         e.preventDefault();
@@ -689,6 +746,21 @@
           }
         } catch {}
       }
+
+      // Hard guard: verify email uniqueness before entering step 3
+      (function hardGuardEmailBeforeStep3(){
+        const btn = document.getElementById('reg-next2');
+        const input = document.getElementById('reg-correo');
+        if (!btn || !input) return;
+        btn.addEventListener('click', async (e) => {
+          try {
+            const v = (input.value || '').trim();
+            if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v)) return;
+            const r = await api('/auth/email-exists?correo=' + encodeURIComponent(v));
+            if (r?.exists) { e.preventDefault(); e.stopImmediatePropagation(); toast('Ese correo ya esta registrado', 'err'); }
+          } catch {}
+        }, { capture: true });
+      })();
 
       // When moving to step 3, ensure code UI is present
       const btnNext2 = qs('#reg-next2');

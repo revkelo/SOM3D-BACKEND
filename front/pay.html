@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Completar Pago — 3DVinci Health</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>:root{color-scheme:dark}</style>
+  <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700&display=swap" rel="stylesheet"/>
+</head>
+<body class="min-h-screen bg-black text-white p-6 font-['Roboto']">
+  <div class="max-w-3xl mx-auto bg-gray-900 border border-gray-800 rounded-2xl p-6">
+    <div class="flex items-center justify-between">
+      <h1 class="text-2xl font-bold"><span class="text-cyan-400">3DVinci</span> Health</h1>
+      <a href="index.html" class="text-sm text-cyan-400 hover:text-cyan-300">← Volver</a>
+    </div>
+    <p id="hello" class="text-sm text-gray-400 mt-1"></p>
+
+    <h2 class="text-xl font-semibold mt-6">Completa tu suscripción</h2>
+    <p class="text-gray-400 text-sm">Selecciona un plan y procesa el pago. Tu cuenta se activará automáticamente al aprobarse.</p>
+
+    <div class="mt-6" id="hospital-code">
+      <h3 class="font-semibold mb-2">¿Tienes código de hospital?</h3>
+      <div class="flex items-center gap-2">
+        <input id="inp-code" class="px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 w-48" placeholder="Código" maxlength="12" />
+        <button id="btn-code" class="px-4 py-2 rounded-lg bg-emerald-500 text-black font-semibold hover:bg-emerald-400">Validar y vincular</button>
+        <span id="code-status" class="text-sm text-gray-400"></span>
+      </div>
+      <p class="text-xs text-gray-500 mt-1">Si estás vinculado a un hospital activo, no necesitas pagar con ePayco.</p>
+    </div>
+
+    <div class="mt-8" id="plans">
+      <div class="flex items-center gap-3">
+        <button id="btn-load" class="px-4 py-2 rounded-lg bg-gray-800 border border-gray-700 hover:bg-gray-700">Cargar planes</button>
+        <button id="btn-resume" class="px-4 py-2 rounded-lg bg-cyan-500 text-black font-semibold hover:bg-cyan-400 hidden">Retomar pago</button>
+        <span id="plan-suggest" class="text-xs text-gray-400"></span>
+      </div>
+      <div id="plans-grid" class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4"></div>
+    </div>
+
+    <div id="checkout" class="mt-6 hidden">
+      <h3 class="font-semibold mb-2">Pagar con ePayco</h3>
+      <form id="epayco-form"></form>
+      <p class="text-xs text-gray-500 mt-2">Si cierras esta ventana, puedes volver aquí para intentar el pago sin registrarte de nuevo.</p>
+    </div>
+  </div>
+
+  <script>
+    const API_BASE = localStorage.getItem('API_BASE') || 'http://localhost:8000';
+    const token = localStorage.getItem('jwt');
+    if (!token) { location.href = 'index.html'; }
+
+    async function api(path, init={}){
+      const res = await fetch(API_BASE + path, {
+        method: init.method || 'GET',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + (localStorage.getItem('jwt')||'') },
+        body: init.body ? JSON.stringify(init.body) : undefined,
+      });
+      const text = await res.text();
+      let data; try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
+      if (!res.ok) throw { status: res.status, data };
+      return data;
+    }
+
+    function toast(msg){
+      alert(msg);
+    }
+
+    async function init(){
+      try {
+        const me = await api('/auth/me');
+        if (me?.activo) { location.href = 'dashboard.html'; return; }
+        document.getElementById('hello').textContent = me?.nombre ? `Hola, ${me.nombre}` : '';
+      } catch {
+        location.href = 'index.html';
+        return;
+      }
+
+      const btn = document.getElementById('btn-load');
+      const btnResume = document.getElementById('btn-resume');
+      const grid = document.getElementById('plans-grid');
+      const checkout = document.getElementById('checkout');
+      const planSuggest = document.getElementById('plan-suggest');
+      const inpCode = document.getElementById('inp-code');
+      const btnCode = document.getElementById('btn-code');
+      const codeStatus = document.getElementById('code-status');
+
+      // Intentar detectar plan habitual o una suscripción PAUSADA para retomar
+      let suggestedPlan = null;
+      try {
+        const mine = await api('/subscriptions/mine');
+        if (mine?.has) {
+          if (mine.active) {
+            planSuggest.textContent = `Tienes una suscripción ACTIVA al plan ${mine?.plan?.nombre || ''}.`;
+          } else if (mine.can_resume && mine.plan) {
+            suggestedPlan = mine.plan;
+            planSuggest.textContent = `Puedes retomar el pago del plan ${mine.plan.nombre}.`;
+            btnResume.classList.remove('hidden');
+            btnResume.addEventListener('click', async () => {
+              btnResume.disabled = true; btnResume.textContent = 'Preparando…';
+              try {
+                const out = await api('/subscriptions/start', { method: 'POST', body: { plan_id: mine.plan.id_plan } });
+                const form = document.getElementById('epayco-form');
+                form.innerHTML = '';
+                const s = document.createElement('script');
+                s.src = 'https://checkout.epayco.co/checkout.js';
+                s.className = 'epayco-button';
+                s.setAttribute('data-epayco-key', out.checkout.key);
+                s.setAttribute('data-epayco-amount', out.checkout.amount);
+                s.setAttribute('data-epayco-tax', '0.00');
+                s.setAttribute('data-epayco-tax-ico', '0.00');
+                s.setAttribute('data-epayco-tax-base', out.checkout.amount);
+                s.setAttribute('data-epayco-name', out.checkout.name);
+                s.setAttribute('data-epayco-description', out.checkout.description);
+                s.setAttribute('data-epayco-currency', out.checkout.currency);
+                s.setAttribute('data-epayco-country', 'CO');
+                s.setAttribute('data-epayco-test', String(!!out.checkout.test));
+                s.setAttribute('data-epayco-external', 'true');
+                const frontResp = location.origin + (location.pathname.replace(/\/[^/]*$/, '/') + 'epayco_result.html');
+                s.setAttribute('data-epayco-response', frontResp);
+                s.setAttribute('data-epayco-confirmation', out.checkout.confirmation);
+                s.setAttribute('data-epayco-invoice', out.checkout.invoice);
+                s.setAttribute('data-epayco-extra1', out.checkout.extra1);
+                s.setAttribute('data-epayco-button', 'https://multimedia.epayco.co/dashboard/btns/btn3.png');
+                form.appendChild(s);
+                checkout.classList.remove('hidden');
+              } catch (err) {
+                alert('No se pudo retomar: ' + (err?.data?.detail || err.status));
+              } finally {
+                btnResume.disabled = false; btnResume.textContent = 'Retomar pago';
+              }
+            });
+          } else if (mine.plan) {
+            suggestedPlan = mine.plan;
+            planSuggest.textContent = `Tu plan habitual: ${mine.plan.nombre}`;
+          }
+        }
+      } catch {}
+
+      btnCode.addEventListener('click', async () => {
+        const code = (inpCode.value || '').trim();
+        if (!code) { toast('Ingresa el código'); inpCode.focus(); return; }
+        btnCode.disabled = true; codeStatus.textContent = 'Validando...';
+        try {
+          // Vincular por código (activa la cuenta si es válido)
+          const resp = await fetch(API_BASE + '/hospitals/link-by-code', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + (localStorage.getItem('jwt')||'') },
+            body: JSON.stringify({ codigo: code })
+          });
+          const txt = await resp.text(); let data; try { data = txt ? JSON.parse(txt) : null; } catch { data = { raw: txt }; }
+          if (!resp.ok) {
+            if (resp.status === 404) { codeStatus.textContent = 'Código inválido o inactivo'; }
+            else if (resp.status === 403) { codeStatus.textContent = 'Solo disponible para médicos'; }
+            else if (resp.status === 401) { toast('Sesión inválida, inicia sesión.'); localStorage.removeItem('jwt'); location.href='index.html'; return; }
+            else { codeStatus.textContent = data?.detail || 'Error'; }
+            return;
+          }
+          codeStatus.textContent = `Vinculado a ${data?.nombre || 'hospital'}. Redirigiendo...`;
+          // Ya no necesita pagar, enviamos a dashboard
+          setTimeout(() => { location.href = 'dashboard.html'; }, 800);
+        } catch (e) {
+          codeStatus.textContent = 'Error de red';
+        } finally {
+          btnCode.disabled = false;
+        }
+      });
+
+      btn.addEventListener('click', async () => {
+        btn.disabled = true; btn.textContent = 'Cargando…';
+        try {
+          const plans = await api('/plans');
+          grid.innerHTML = '';
+          plans.forEach(p => {
+            const card = document.createElement('button');
+            card.className = 'text-left p-4 bg-black/40 border border-gray-800 rounded-xl hover:border-cyan-400';
+            card.innerHTML = `<div class="font-semibold">${p.nombre}</div><div class="text-sm text-gray-400">$${p.precio} · ${p.periodo} (${p.duracion_meses} meses)</div>`;
+            card.addEventListener('click', async () => {
+              try {
+                const out = await api('/subscriptions/start', { method: 'POST', body: { plan_id: p.id_plan } });
+                // Montar botón ePayco
+                const form = document.getElementById('epayco-form');
+                form.innerHTML = '';
+                const s = document.createElement('script');
+                s.src = 'https://checkout.epayco.co/checkout.js';
+                s.className = 'epayco-button';
+                s.setAttribute('data-epayco-key', out.checkout.key);
+                s.setAttribute('data-epayco-amount', out.checkout.amount);
+                s.setAttribute('data-epayco-tax', '0.00');
+                s.setAttribute('data-epayco-tax-ico', '0.00');
+                s.setAttribute('data-epayco-tax-base', out.checkout.amount);
+                s.setAttribute('data-epayco-name', out.checkout.name);
+                s.setAttribute('data-epayco-description', out.checkout.description);
+                s.setAttribute('data-epayco-currency', out.checkout.currency);
+                s.setAttribute('data-epayco-country', 'CO');
+                s.setAttribute('data-epayco-test', String(!!out.checkout.test));
+                s.setAttribute('data-epayco-external', 'true');
+                const frontResp = location.origin + (location.pathname.replace(/\/[^/]*$/, '/') + 'epayco_result.html');
+                s.setAttribute('data-epayco-response', frontResp);
+                s.setAttribute('data-epayco-confirmation', out.checkout.confirmation);
+                s.setAttribute('data-epayco-invoice', out.checkout.invoice);
+                s.setAttribute('data-epayco-extra1', out.checkout.extra1);
+                s.setAttribute('data-epayco-button', 'https://multimedia.epayco.co/dashboard/btns/btn3.png');
+                form.appendChild(s);
+                checkout.classList.remove('hidden');
+              } catch (err) {
+                if (err?.status === 409) {
+                  toast(err?.data?.detail || 'Ya existe una suscripción activa.');
+                } else if (err?.status === 401) {
+                  toast('Sesión inválida, inicia sesión nuevamente.');
+                  localStorage.removeItem('jwt'); location.href = 'index.html';
+                } else {
+                  toast('Error: ' + (err?.data?.detail || err.status));
+                }
+              }
+            });
+            grid.appendChild(card);
+          })
+        } catch (e) {
+          grid.innerHTML = '<div class="text-red-400">Error cargando planes</div>';
+        } finally {
+          btn.disabled = false; btn.textContent = 'Cargar planes';
+        }
+      });
+    }
+    init();
+  </script>
+</body>
+</html>

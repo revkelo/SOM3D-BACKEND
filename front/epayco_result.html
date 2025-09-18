@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Resultado del Pago — 3DVinci Health</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>:root{color-scheme:dark}</style>
+  <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700&display=swap" rel="stylesheet"/>
+</head>
+<body class="min-h-screen bg-black text-white flex items-center justify-center p-6 font-['Roboto']">
+  <div class="w-full max-w-2xl bg-gray-900 rounded-2xl p-6 border border-gray-800">
+    <div class="flex items-center justify-between mb-2">
+      <h1 class="text-2xl font-bold">Resultado del Pago</h1>
+      <span id="hello" class="text-sm text-gray-400"></span>
+    </div>
+
+    <div id="loading" class="flex items-center gap-3 py-3">
+      <svg class="animate-spin h-5 w-5 text-cyan-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path></svg>
+      <span class="text-gray-300">Validando con ePayco…</span>
+    </div>
+
+    <div id="result" class="hidden">
+      <div id="status" class="mb-4"></div>
+
+      <div class="grid grid-cols-1 gap-3">
+        <div class="bg-black/40 border border-gray-800 rounded-xl p-3">
+          <div class="text-xs text-gray-400">Monto</div>
+          <div id="monto" class="text-lg font-semibold"></div>
+        </div>
+        <div class="bg-black/40 border border-gray-800 rounded-xl p-3">
+          <div class="text-xs text-gray-400">Referencia</div>
+          <div id="ref" class="text-sm"></div>
+        </div>
+        <div class="bg-black/40 border border-gray-800 rounded-xl p-3">
+          <div class="text-xs text-gray-400">Transacción</div>
+          <div id="tx" class="text-sm"></div>
+        </div>
+        <div class="bg-black/40 border border-gray-800 rounded-xl p-3">
+          <div class="text-xs text-gray-400">Factura</div>
+          <div id="inv" class="text-sm"></div>
+        </div>
+        <div class="bg-black/40 border border-gray-800 rounded-xl p-3">
+          <div class="text-xs text-gray-400">Fecha</div>
+          <div id="fecha" class="text-sm"></div>
+        </div>
+      </div>
+
+      <details class="mt-5">
+        <summary class="text-sm text-gray-400 cursor-pointer">Ver detalle técnico</summary>
+        <pre id="details" class="mt-2 text-xs text-gray-300 whitespace-pre-wrap bg-black border border-gray-700 rounded-xl p-3"></pre>
+      </details>
+
+      <div class="mt-6 flex gap-3">
+        <a href="./login.html" class="px-4 py-2 rounded-lg bg-cyan-500 text-black font-semibold hover:bg-cyan-400">Volver al inicio</a>
+      </div>
+    </div>
+  </div>
+  <script>
+    const params = new URLSearchParams(location.search);
+    const ref = params.get('ref_payco') || '';
+    const statusEl = document.getElementById('status');
+    const detailsEl = document.getElementById('details');
+    const helloEl = document.getElementById('hello');
+    const loadingEl = document.getElementById('loading');
+    const resultEl = document.getElementById('result');
+    const API_BASE = localStorage.getItem('API_BASE') || 'http://localhost:8000';
+
+    // Saludo con nombre si hay user en localStorage (guardado tras login)
+    try {
+      const user = JSON.parse(localStorage.getItem('user') || 'null');
+      if (user?.nombre) helloEl.textContent = `Hola, ${user.nombre}`;
+    } catch {}
+
+    function badgeByEstado(estado){
+      const up = (estado || '').toUpperCase();
+      if (up === 'APROBADO') return '<span class="px-3 py-1 rounded-full bg-green-500 text-black font-semibold">Pago Aprobado</span>';
+      if (up === 'RECHAZADO') return '<span class="px-3 py-1 rounded-full bg-red-500 text-black font-semibold">Pago Rechazado</span>';
+      if (up === 'PENDIENTE') return '<span class="px-3 py-1 rounded-full bg-yellow-400 text-black font-semibold">Pago Pendiente</span>';
+      return '<span class="px-3 py-1 rounded-full bg-gray-500 text-black font-semibold">Estado Desconocido</span>';
+    }
+
+    const delay = (ms) => new Promise(r => setTimeout(r, ms));
+
+    async function main(){
+      if(!ref){
+        loadingEl.classList.add('hidden');
+        resultEl.classList.remove('hidden');
+        statusEl.innerHTML = '<div class="text-yellow-300">No se recibió ref_payco en la URL.</div>';
+        return;
+      }
+      try{
+        const [res] = await Promise.all([
+          fetch(API_BASE + '/epayco/validate?ref_payco=' + encodeURIComponent(ref)),
+          delay(2000) // mostrar el loading al menos 2s
+        ]);
+        const data = await res.json();
+        const estado = data?.estado || '';
+        statusEl.innerHTML = `<div class="flex items-center gap-3">${badgeByEstado(estado)}<span class=\"text-sm text-gray-400\">ref_payco: ${ref}</span></div>`;
+        const d = data?.data || {};
+        document.getElementById('monto').textContent = (d.x_amount ? Number(d.x_amount).toFixed(2) : '0.00') + ' ' + (d.x_currency_code || '');
+        document.getElementById('ref').textContent = ref || '-';
+        document.getElementById('tx').textContent = d.x_transaction_id || '-';
+        document.getElementById('inv').textContent = d.x_id_invoice || '-';
+        document.getElementById('fecha').textContent = d.x_transaction_date || '-';
+        detailsEl.textContent = JSON.stringify(data, null, 2);
+      }catch(err){
+        statusEl.innerHTML = '<div class="text-red-400">Error consultando estado del pago.</div>';
+        detailsEl.textContent = String(err);
+      } finally {
+        loadingEl.classList.add('hidden');
+        resultEl.classList.remove('hidden');
+      }
+    }
+    main();
+  </script>
+</body>
+</html>
+

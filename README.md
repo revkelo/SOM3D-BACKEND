@@ -48,8 +48,24 @@ Puntos de salud y rutas
 - `POST /auth/login`
 - `GET /auth/me` (Bearer)
 - `GET /plans`
+- `GET /plans/{id}`
+- `POST /plans` (Bearer ADMIN)
+- `PATCH /plans/{id}` (Bearer ADMIN)
+- `DELETE /plans/{id}` (Bearer ADMIN; borra suscripciones y pagos del plan)
 - `POST /subscriptions/start` (Bearer)
 - `GET /subscriptions/mine` (Bearer)
+- `GET /subscriptions` (Bearer ADMIN; filtros por id_medico/id_hospital/estado/plan_id)
+- `GET /subscriptions/{id}` (Bearer ADMIN)
+- `PATCH /subscriptions/{id}` (Bearer ADMIN; cambiar estado ACTIVA/PAUSADA con validación de conflicto)
+- `DELETE /subscriptions/{id}` (Bearer ADMIN; borra pagos primero)
+- `GET /subscriptions/{id}/payments` (Bearer ADMIN)
+- `GET /hospitals` (Bearer; lista activos; admin puede incluir todos)
+- `GET /hospitals/{id}` (Bearer)
+- `GET /hospitals/by-code/{codigo}` (público)
+- `POST /hospitals/link-by-code` (Bearer MEDICO; vincula por código y activa la cuenta)
+- `POST /hospitals` (Bearer ADMIN)
+- `PATCH /hospitals/{id}` (Bearer ADMIN)
+- `DELETE /hospitals/{id}` (Bearer ADMIN; borra pagos y suscripciones asociadas y desasocia médicos)
 - `GET /epayco/response` (HTML)
 - `GET /epayco/validate?ref_payco=...`
 - `GET|POST /epayco/confirmation`

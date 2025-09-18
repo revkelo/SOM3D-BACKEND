@@ -4,9 +4,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from .routes.auth import router as auth_router
 from .routes.plans import router as plans_router
 from .routes.subscriptions import router as subs_router
+from .routes.hospitals import router as hospitals_router
 from .epayco import router as epayco_router
 
-app = FastAPI(title="SOM3D Backend + Auth + Planes + ePayco", version="1.0.0")
+app = FastAPI(title="SOM3D Backend", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -20,6 +21,7 @@ app.add_middleware(
 app.include_router(auth_router, prefix="/auth", tags=["auth"])
 app.include_router(plans_router, tags=["plans"])
 app.include_router(subs_router, tags=["subscriptions"])
+app.include_router(hospitals_router, tags=["hospitals"])
 app.include_router(epayco_router)  # /epayco/...
 
 @app.get("/health")

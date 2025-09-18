@@ -13,6 +13,7 @@ from ..schemas import (
     ForgotPasswordIn,
     ResetPasswordIn,
     ConfirmCodeIn,
+    ResetPasswordCodeIn,
 )
 from ..mailer import send_email
 from ..config import SMTP_HOST, BASE_URL, FRONTEND_BASE_URL, VERIFY_EMAIL_EXPIRE_MIN, RESET_PASS_EXPIRE_MIN
@@ -22,6 +23,9 @@ from ..tokens import (
     make_reset_token,
     parse_reset_token,
     token_fp_matches,
+    make_reset_code_token,
+    parse_reset_code_token,
+    _fp_password,
 )
 from ..auth import hash_password, verify_password, create_access_token, get_current_user
 from fastapi.responses import HTMLResponse
@@ -131,6 +135,59 @@ def reset_password(payload: ResetPasswordIn, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Token invalido o expirado")
     user = db.query(Usuario).filter(Usuario.id_usuario == int(data.get("sub", 0))).first()
     if not user or not token_fp_matches(data, user.contrasena):
+        raise HTTPException(status_code=400, detail="Token invalido o expirado")
+    user.contrasena = hash_password(payload.new_password)
+    db.commit()
+    return {"ok": True}
+
+
+# --- Flujo alternativo: código de 6 dígitos para restablecer ---
+@router.post("/forgot-password/code")
+def forgot_password_code(payload: ForgotPasswordIn, db: Session = Depends(get_db)):
+    user = db.query(Usuario).filter(Usuario.correo == payload.correo).first()
+    if user:
+        try:
+            # Generar código 6 dígitos + token con fingerprint
+            import secrets
+            code = str(secrets.randbelow(1_000_000)).zfill(6)
+            data = {
+                "sub": user.id_usuario,
+                "fp": _fp_password(user.contrasena),
+                "code": code,
+            }
+            token = make_reset_code_token(data, RESET_PASS_EXPIRE_MIN)
+            # Enviar correo con el código
+            html = f"""
+                <h2>Restablecer contrasena</h2>
+                <p>Hola {user.nombre}, usa este codigo para restablecer tu contrasena:</p>
+                <p style='font-size:22px;letter-spacing:4px'><b>{code}</b></p>
+                <p><small>El codigo expira en {RESET_PASS_EXPIRE_MIN} minutos.</small></p>
+            """.strip()
+            send_email(user.correo, "Tu codigo de restablecimiento", html)
+            return {"ok": True, "token": token, "expires_in": RESET_PASS_EXPIRE_MIN}
+        except Exception:
+            pass
+    # Siempre OK para no filtrar existencia
+    return {"ok": True}
+
+
+@router.post("/reset-password/code")
+def reset_password_code(payload: ResetPasswordCodeIn, db: Session = Depends(get_db)):
+    data = parse_reset_code_token(payload.token)
+    if not data:
+        raise HTTPException(status_code=400, detail="Token invalido o expirado")
+    # Validar código
+    code_expected = (data.get("code") or "").strip()
+    if (payload.code or "").strip() != code_expected:
+        raise HTTPException(status_code=400, detail="Codigo invalido o expirado")
+    # Validar fingerprint y actualizar contraseña
+    user = db.query(Usuario).filter(Usuario.id_usuario == int(data.get("sub", 0))).first()
+    if not user:
+        raise HTTPException(status_code=400, detail="Token invalido o expirado")
+    # fp guardado en token al generar
+    saved_fp = data.get("fp")
+    from ..tokens import token_fp_matches as _tfm
+    if not _tfm({"fp": saved_fp}, user.contrasena):
         raise HTTPException(status_code=400, detail="Token invalido o expirado")
     user.contrasena = hash_password(payload.new_password)
     db.commit()

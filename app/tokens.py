@@ -61,3 +61,23 @@ def token_fp_matches(token_payload: dict, current_hashed_password: str) -> bool:
     except Exception:
         return False
 
+
+# Tokens para flujo de restablecimiento con código de 6 dígitos
+def make_reset_code_token(data: dict, expires_minutes: int) -> str:
+    payload = {
+        "k": "reset_code",
+        "d": data,
+        "iat": int(_now().timestamp()),
+        "exp": int((_now() + timedelta(minutes=expires_minutes)).timestamp()),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
+
+
+def parse_reset_code_token(token: str) -> dict | None:
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
+        if payload.get("k") != "reset_code":
+            return None
+        return payload.get("d") or {}
+    except Exception:
+        return None

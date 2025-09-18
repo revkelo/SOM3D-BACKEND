@@ -146,3 +146,9 @@ class ResetPasswordIn(BaseModel):
 class ConfirmCodeIn(BaseModel):
     token: str = Field(min_length=10, max_length=4096)
     code: str = Field(min_length=6, max_length=6)
+
+
+class ResetPasswordCodeIn(BaseModel):
+    token: str = Field(min_length=10, max_length=4096)
+    code: str = Field(min_length=6, max_length=6)
+    new_password: str = Field(min_length=6, max_length=128)

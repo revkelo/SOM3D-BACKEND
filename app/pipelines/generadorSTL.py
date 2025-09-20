@@ -171,7 +171,7 @@ class NiiToStlConverter:
                 volume=smoothed, level=level, spacing=(1.0, 1.0, 1.0)
             )
 
-            # Ahora aplica affine UNA sola vez
+            # Aplica affine UNA vez
             verts = nib.affines.apply_affine(img.affine, verts)
 
             # STL base con trimesh
@@ -181,10 +181,9 @@ class NiiToStlConverter:
             tm.fix_normals()
 
             if not tm.is_watertight:
-                tm.fill_holes()  # FIX: rellenar huecos
+                tm.fill_holes()
             tm.export(out_stl)
             print(f"[{name}] ✅ STL base: {out_stl}")
-
 
             # Decimación
             method, reduced_mesh = None, None
@@ -241,7 +240,7 @@ class NiiToStlConverter:
             reduced_mesh.fix_normals()
 
             if not reduced_mesh.is_watertight:
-                reduced_mesh.fill_holes()  # FIX
+                reduced_mesh.fill_holes()
 
             filter_laplacian(reduced_mesh, lamb=self.laplacian_lambda, iterations=self.laplacian_iters)
             reduced_mesh.export(out_stl_reduced)
@@ -281,7 +280,7 @@ class NiiToStlConverter:
         print(f"\n📄 Log guardado en: {log_path}")
 
 
-# Ejemplo de uso
+# Ejemplo de uso (opcional)
 if __name__ == "__main__":
     input_dir   = r"C:/Dicoms - SOM3D"
     output_root = r"C:/Dicoms - SOM3D/STL's"

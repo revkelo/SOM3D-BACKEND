@@ -34,7 +34,7 @@ DEFAULT_FORCE_CPU = False  # True para forzar CPU/--fast
 
 # Importa tu detector
 try:
-    from cuda import cuda  # tu clase 'cuda' definida en cuda.py
+    from .cuda import cuda  # tu clase 'cuda' definida en cuda.py
 except Exception as e:
     cuda = None
     print(f"[WARN] No se pudo importar cuda.py ({e}). Se asumirá CPU.", file=sys.stderr)

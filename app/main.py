@@ -1,27 +1,21 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from app.routes.convert import router as convert_router
 
-from .routes.auth import router as auth_router
-from .routes.plans import router as plans_router
-from .routes.subscriptions import router as subs_router
-from .epayco import router as epayco_router
+app = FastAPI(title="SOM3D — DICOM → STL")
 
-app = FastAPI(title="SOM3D Backend + Auth + Planes + ePayco", version="1.0.0")
-
+# CORS mínimo para el front local (ajusta dominios para producción)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Routers
-app.include_router(auth_router, prefix="/auth", tags=["auth"])
-app.include_router(plans_router, tags=["plans"])
-app.include_router(subs_router, tags=["subscriptions"])
-app.include_router(epayco_router)  # /epayco/...
-
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+# Pipeline
+app.include_router(convert_router)

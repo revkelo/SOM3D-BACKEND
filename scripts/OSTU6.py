@@ -13,6 +13,7 @@ import numpy as np
 import nibabel as nib
 from skimage.filters import threshold_otsu
 from skimage.measure import marching_cubes
+from scipy import ndimage  # suavizado volumétrico
 
 # ---- Decimación / Suavizado de malla (MeshLab) ----
 try:
@@ -90,14 +91,13 @@ def postprocess_with_meshlab(vertices: np.ndarray,
                              faces: np.ndarray,
                              out_path: Path,
                              *,
-                             targetperc: float = 0.5,     # << porcentaje de caras final (0.7 = más detalle)
-                             taubin_iters: int = 25,      # << 40–60 = ultra smooth (más tiempo)
-                             taubin_lambda: float = 0.5,
-                             taubin_mu: float = -0.53,
+                             targetperc: float = 0.70,    # ↑ conserva más caras (apariencia más lisa)
+                             taubin_iters: int = 80,      # ↑ más iteraciones
+                             taubin_lambda: float = 0.62, # ↑ suavizado
+                             taubin_mu: float = -0.66,    # pareja de λ
                              close_holes_maxsize: int = 200) -> dict:
     """
-    Pipeline HQ: limpieza -> suavizado Taubin -> decimación cuadrática -> pulido -> normales -> guardar STL.
-    Usa nombres de filtros vigentes en PyMeshLab.
+    Pipeline HQ: limpieza -> (subdivisión) -> Taubin -> decimación quadric -> pulido -> normales -> guardar STL.
     """
     ms = ml.MeshSet()
     mesh = ml.Mesh(vertices.astype(np.float32), faces.astype(np.int32))
@@ -116,7 +116,13 @@ def postprocess_with_meshlab(vertices: np.ndarray,
         except Exception:
             pass
 
-    # ---- Suavizado Taubin (nombres actuales) ----
+    # (Opcional) Subdivisión Loop x1 para ganar grados de libertad (mejor acabado)
+    try:
+        ms.apply_filter('meshing_surface_subdivision_loop', steps=1)
+    except Exception:
+        pass
+
+    # ---- Suavizado Taubin (fuerte) ----
     def _try_taubin(steps, lam, mu):
         try:
             ms.apply_filter('apply_coord_taubin_smoothing',
@@ -126,7 +132,6 @@ def postprocess_with_meshlab(vertices: np.ndarray,
             return True
         except Exception:
             try:
-                # Alternativa: laplaciano preservando superficie
                 ms.apply_filter('apply_coord_laplacian_smoothing_surface_preserving',
                                 stepsmoothnum=max(10, steps),
                                 cotangentweight=True)
@@ -147,13 +152,13 @@ def postprocess_with_meshlab(vertices: np.ndarray,
                     boundaryweight=1.0,
                     preservetopology=True)
 
-    # Pulido ligero final
+    # Pulido final un poco más fuerte
     try:
-        _try_taubin(max(5, taubin_iters // 5), 0.5, -0.53)
+        _try_taubin(20, 0.60, -0.65)
     except Exception:
         pass
 
-    # Recalcular normales (nombres correctos)
+    # Recalcular normales
     for f in ('compute_normal_per_vertex', 'compute_normal_per_face'):
         try:
             ms.apply_filter(f)
@@ -206,40 +211,40 @@ def convert_folder(
             if voxels < int(min_voxels):
                 raise RuntimeError(f"Máscara muy pequeña: {voxels} < {min_voxels}")
 
-            # Marching cubes sobre máscara binaria (espaciado en mm)
+            # ---- Marching cubes con suavizado volumétrico previo ----
             spacing = voxel_spacing_from_affine(affine)
+
+            # Anti-alias de bordes (más suave)
+            smoothed = ndimage.gaussian_filter(mask.astype(np.float32), sigma=1.5)
+            level = 0.5
+
             verts, faces, _, _ = marching_cubes(
-                (mask.astype(np.uint8)),
-                level=0.5,
-                spacing=spacing
+                smoothed, level=level, spacing=spacing
             )
             verts = verts.astype(np.float32)
             faces = faces.astype(np.int32)
 
-            # Guardar STL original (por trazabilidad)
+            # Guardar STL original (trazabilidad)
             out_stl_orig = originals_dir / (f.stem.replace(".nii", "") + ".stl")
             _save_stl_numpy(verts, faces, out_stl_orig)
 
             faces_after = faces.shape[0]
             out_hq = ""
-            method = "auto-otsu + HQ(Taubin+Quadric)"
+            method = "auto-otsu + VolSmooth + HQ(Taubin+Quadric)"
             if _HAS_PYMESHLAB:
-                # Aplicar pipeline HQ
                 out_stl_hq = hq_dir / (f.stem.replace(".nii", "") + "_HQ.stl")
-                # donde llamas postprocess_with_meshlab(...)
                 metrics = postprocess_with_meshlab(
                     verts, faces, out_stl_hq,
-                    targetperc=0.65,
-                    taubin_iters=60,         # ← antes 25
-                    taubin_lambda=0.6,       # ← antes 0.5
-                    taubin_mu=-0.63,         # ← antes -0.53
+                    targetperc=0.70,
+                    taubin_iters=80,
+                    taubin_lambda=0.62,
+                    taubin_mu=-0.66,
                     close_holes_maxsize=200
                 )
-
                 faces_after = metrics["faces_after"]
                 out_hq = str(out_stl_hq)
             else:
-                method = "auto-otsu (sin HQ: falta PyMeshLab)"
+                method = "auto-otsu + VolSmooth (sin HQ: falta PyMeshLab)"
 
             elapsed = time.perf_counter() - per_start
             progress_cb(f"  OK | Otsu t={t:.3f} | voxels={voxels} | caras={faces_after} | {elapsed:.2f}s\n")
@@ -305,7 +310,7 @@ def convert_folder(
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("NIfTI ➜ STL (Otsu + Taubin + Quadric) — by José 💪")
+        self.title("NIfTI ➜ STL (Otsu + VolSmooth + Taubin + Quadric) — by José 💪")
         self.geometry("840x640")
         self.resizable(True, True)
 
@@ -417,7 +422,7 @@ class App(tk.Tk):
 
         self.run_btn.config(state="disabled")
         self.pbar.start(10)
-        self.log("\n=== Inicio de conversión (Otsu + HQ Taubin + Quadric) ===\n")
+        self.log("\n=== Inicio de conversión (Otsu + VolSmooth + HQ Taubin + Quadric) ===\n")
         if not _HAS_PYMESHLAB:
             self.log("[AVISO] Instala PyMeshLab para suavizado/decimación HQ: pip install pymeshlab\n")
 

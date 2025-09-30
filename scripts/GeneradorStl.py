@@ -106,16 +106,23 @@ def mask_from_otsu_gpu_only(vol_np: np.ndarray, clip_min: float|None, clip_max: 
     mask_np = cp.asnumpy(data >= t)
     return mask_np, float(t)
 
-def _numpy_to_vtk_image(mask: np.ndarray, spacing: tuple[float,float,float]) -> "vtk.vtkImageData":
-    z, y, x = mask.shape
+def _numpy_to_vtk_image(mask: np.ndarray,
+                        spacing: tuple[float, float, float],
+                        origin: tuple[float, float, float] = (0.0, 0.0, 0.0)) -> "vtk.vtkImageData":
+    # mask debe ser (x, y, z)
+    x, y, z = mask.shape
+
     img = vtk.vtkImageData()
     img.SetDimensions(int(x), int(y), int(z))
     img.SetSpacing(float(spacing[0]), float(spacing[1]), float(spacing[2]))
-    img.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 1)
-    flat = mask.astype(np.uint8, copy=False).ravel(order="C")
-    arr = vtk_np.numpy_to_vtk(flat, deep=True, array_type=vtk.VTK_UNSIGNED_CHAR)
-    img.GetPointData().SetScalars(arr)
+    img.SetOrigin(float(origin[0]), float(origin[1]), float(origin[2]))
+
+    # Aplanado Fortran para que x sea el índice que varía más rápido en VTK
+    arr_np = mask.astype(np.uint8, copy=False).ravel(order="F")
+    arr_vtk = vtk_np.numpy_to_vtk(arr_np, deep=True, array_type=vtk.VTK_UNSIGNED_CHAR)
+    img.GetPointData().SetScalars(arr_vtk)
     return img
+
 
 def marching_cubes_cpu_vtk(mask: np.ndarray, spacing: tuple[float,float,float]) -> tuple[np.ndarray, np.ndarray]:
     if not _HAS_VTK: raise RuntimeError("VTK no disponible.")

@@ -3,22 +3,20 @@
 """
 SOM3D TotalSegmentator GUI (GPU→CPU fallback, Ortopedia-only)
 - Siempre intenta GPU; si falla, cae a CPU (sin --fast).
-- Opciones de la UI:
-    * GPU --fast (opcional)
-    * Solo estadísticas (--statistics)
+- Única opción visible: GPU --fast (opcional).
+- Siempre genera estadísticas (--statistics).
 - Solo preset ORTOPEDIA (inyecta --roi_subset osteo-articular).
-- Sin selector de Task ni de dispositivo.
 - Auto-hilos según VRAM/CPU; importación DICOM robusta.
-- Mide tiempo total con precisión de milisegundos (wall-clock).
+- TMP en mismo disco que la salida para reducir I/O cruzado.
 """
 
-import os, sys, shlex, zipfile, tempfile, subprocess, threading, shutil, time
+import os, sys, shlex, zipfile, tempfile, subprocess, threading, shutil, time, queue, re
 from datetime import datetime
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-# ---------------- Preset: SOLO ORTOPEDIA (sin músculos) ---------------- #
+# ---------- Constantes ----------
 ORTHO_ROI = [
     "skull","sacrum",
     "vertebrae_C1","vertebrae_C2","vertebrae_C3","vertebrae_C4","vertebrae_C5","vertebrae_C6","vertebrae_C7",
@@ -31,7 +29,13 @@ ORTHO_ROI = [
     "humerus_left","humerus_right","femur_left","femur_right","hip_left","hip_right",
 ]
 
-# ---------------- Utilidades de tiempo ---------------- #
+os.environ.setdefault("OMP_NUM_THREADS","1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS","1")
+os.environ.setdefault("MKL_NUM_THREADS","1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS","1")
+os.environ.setdefault("PYTHONUTF8","1")  # Python 3.7+: activa modo UTF-8
+
+# ---------- Utilidades ----------
 def format_duration(seconds: float) -> str:
     total_ms = int(round(seconds * 1000))
     ms = total_ms % 1000
@@ -41,8 +45,7 @@ def format_duration(seconds: float) -> str:
     s = total_sec % 60
     return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
 
-# ---------------- Detección de GPU ---------------- #
-def detect_device():
+def detect_device_once():
     info = {
         "backend": "cpu", "available": False, "device": "cpu",
         "torch_version": None, "cuda_compiled": False, "cuda_available": False,
@@ -55,15 +58,17 @@ def detect_device():
         info["cuda_compiled"] = torch.version.cuda is not None
         info["cuda_available"] = torch.cuda.is_available()
         info["cuda_version"] = torch.version.cuda
-        info["device_count"] = torch.cuda.device_count() if info["cuda_available"] else 0
-        if info["cuda_available"] and info["device_count"] > 0:
+        if info["cuda_available"]:
             idx = torch.cuda.current_device()
             prop = torch.cuda.get_device_properties(idx)
-            info["backend"] = "cuda"; info["available"] = True
-            info["device"] = f"cuda:{idx}"; info["device_name"] = prop.name
+            info.update({
+                "backend":"cuda","available":True,"device":f"cuda:{idx}",
+                "device_count": torch.cuda.device_count(),
+                "device_name": prop.name
+            })
             try:
                 free, total = torch.cuda.mem_get_info(idx)
-                info["vram_free_gb"] = round(free/(1024**3), 2)
+                info["vram_free_gb"]  = round(free /(1024**3), 2)
                 info["vram_total_gb"] = round(total/(1024**3), 2)
             except Exception:
                 pass
@@ -79,42 +84,60 @@ def device_summary_text(dev: dict) -> str:
         f"Nombre: {dev['device_name']} | VRAM: {dev['vram_free_gb']}/{dev['vram_total_gb']} GB"
     )
 
-# --------------- Utils path/zip --------------- #
 def is_nii(path: Path) -> bool:
     n = path.name.lower()
     return n.endswith(".nii") or n.endswith(".nii.gz")
 
-def unzip_to_temp(zip_path: Path) -> Path:
-    tmpdir = Path(tempfile.mkdtemp(prefix="ts_zip_"))
+def ensure_dir(p: Path): p.mkdir(parents=True, exist_ok=True)
+
+def _safe_extractall(zf: zipfile.ZipFile, dest: Path):
+    # Evita path traversal en ZIPs maliciosos
+    dest = dest.resolve()
+    for member in zf.infolist():
+        out_path = (dest / member.filename).resolve()
+        if not str(out_path).startswith(str(dest)):
+            raise RuntimeError(f"Entrada ZIP inválida: {member.filename}")
+    zf.extractall(dest)
+
+def unzip_to_temp(zip_path: Path, base_tmp: Path) -> Path:
+    tmpdir = base_tmp / f"ts_zip_{int(time.time()*1000)}"
+    tmpdir.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(zip_path, 'r') as zf:
-        zf.extractall(tmpdir)
+        _safe_extractall(zf, tmpdir)
     subs = [p for p in tmpdir.iterdir() if p.is_dir()]
     return subs[0] if len(subs) == 1 else tmpdir
 
-def ensure_dir(p: Path): p.mkdir(parents=True, exist_ok=True)
-
 def pick_largest_nii(folder: Path) -> Path | None:
-    niis = list(folder.rglob("*.nii")) + list(folder.rglob("*.nii.gz"))
-    return max(niis, key=lambda p: p.stat().st_size) if niis else None
+    largest = None
+    largest_size = -1
+    for ext in ("*.nii", "*.nii.gz"):
+        for p in folder.rglob(ext):
+            s = p.stat().st_size
+            if s > largest_size:
+                largest_size = s
+                largest = p
+    return largest
 
-# ----------- Agrupar por serie y elegir la mejor ----------- #
+# ---------- DICOM series ----------
 def split_series(input_dir: Path, on_log=print) -> dict[str, list[Path]]:
     try:
         import pydicom as dcm
     except Exception:
-        on_log("[WARN] pydicom no disponible; no se puede separar por serie.")
+        on_log("[WARN] pydicom no disponible; no se separa por serie.")
         return {}
-    series: dict[str, list[Path]] = {}
-    files = [p for p in input_dir.rglob("*") if p.is_file()]
-    for f in files:
-        try:
-            ds = dcm.dcmread(str(f), stop_before_pixels=True, force=True)
-            uid = str(getattr(ds, 'SeriesInstanceUID', 'UNKNOWN'))
-            series.setdefault(uid, []).append(f)
-        except Exception:
-            continue
+    series = {}
+    for root, _, files in os.walk(input_dir):
+        root_p = Path(root)
+        for name in files:
+            f = root_p / name
+            try:
+                ds = dcm.dcmread(str(f), stop_before_pixels=True, force=True)
+                uid = str(getattr(ds, 'SeriesInstanceUID', 'UNKNOWN'))
+                series.setdefault(uid, []).append(f)
+            except Exception:
+                continue
     for uid, lst in series.items():
-        on_log(f"[INFO] Serie {uid[:8]}… con {len(lst)} archivos")
+        on_log(f"[INFO] Serie {uid[:8]}… ({len(lst)} archivos)")
     return series
 
 def select_best_series(input_dir: Path, on_log=print) -> Path | None:
@@ -122,33 +145,16 @@ def select_best_series(input_dir: Path, on_log=print) -> Path | None:
     if not series:
         return None
     uid, files = max(series.items(), key=lambda kv: len(kv[1]))
-    try:
-        import pydicom as dcm, numpy as np
-        def orient_key(fp: Path):
-            try:
-                ds = dcm.dcmread(str(fp), stop_before_pixels=True, force=True)
-                iop = getattr(ds, 'ImageOrientationPatient', None)
-                if iop is not None:
-                    arr = np.array(iop, dtype=float)
-                    return tuple((arr/np.linalg.norm(arr)).round(3))
-            except Exception:
-                pass
-            return None
-        keys = {orient_key(f) for f in files}
-        on_log(f"[INFO] Orientaciones detectadas en serie elegida: {len(keys)}")
-    except Exception:
-        pass
-    tmp = Path(tempfile.mkdtemp(prefix="ts_series_"))
+    tmp = input_dir.parent / f"ts_series_{int(time.time()*1000)}"
+    tmp.mkdir(parents=True, exist_ok=True)
     for i, f in enumerate(sorted(files)):
-        # nombre formateado ANTES de unir al Path (evita error % con WindowsPath)
-        fname = f"img_{i:05d}.dcm"
-        dst = tmp / fname
+        dst = tmp / f"img_{i:05d}.dcm"
         try: shutil.copy2(f, dst)
         except Exception: pass
     on_log(f"[INFO] Serie seleccionada → {tmp} ({len(files)} DICOMs)")
     return tmp
 
-# ----------- Conversión robusta DICOM -> NIfTI ----------- #
+# ---------- Conversión DICOM -> NIfTI ----------
 def convert_with_dcm2niix(input_dir: Path, out_dir: Path, on_log=print) -> Path | None:
     exe = shutil.which("dcm2niix")
     if not exe: return None
@@ -157,7 +163,7 @@ def convert_with_dcm2niix(input_dir: Path, out_dir: Path, on_log=print) -> Path 
     on_log("dcm2niix: " + " ".join(shlex.quote(x) for x in cmd))
     rc = subprocess.call(cmd)
     if rc != 0:
-        on_log(f"dcm2niix rc={rc} (no se generó NIfTI)")
+        on_log(f"dcm2niix rc={rc} (sin NIfTI)")
         return None
     nii = pick_largest_nii(out_dir)
     if nii: on_log(f"dcm2niix OK → {nii.name}")
@@ -168,22 +174,25 @@ def decompress_series_with_pydicom(input_dir: Path, out_dir: Path, on_log=print)
         import pydicom as dcm
         from pydicom.uid import ExplicitVRLittleEndian
         ensure_dir(out_dir); count = 0
-        for f in sorted([p for p in input_dir.rglob("*") if p.is_file()]):
-            try:
-                ds = dcm.dcmread(str(f), force=True)
-                ts = ds.file_meta.TransferSyntaxUID
-                if getattr(ts, 'is_compressed', False):
-                    _ = ds.pixel_array
-                    ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
-                    ds.is_implicit_VR = False; ds.is_little_endian = True
-                dst = out_dir / f"{count:05d}.dcm"
-                ds.save_as(str(dst), write_like_original=False); count += 1
-            except Exception as e:
-                on_log(f"[WARN] No se pudo reescribir {f.name}: {e}")
-        on_log(f"[INFO] Reescritos {count} DICOMs sin compresión en {out_dir}")
+        for root, _, files in os.walk(input_dir):
+            root_p = Path(root)
+            for name in sorted(files):
+                f = root_p / name
+                try:
+                    ds = dcm.dcmread(str(f), force=True)
+                    ts = ds.file_meta.TransferSyntaxUID
+                    if getattr(ts, 'is_compressed', False):
+                        _ = ds.pixel_array  # fuerza decodificación
+                        ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+                        ds.is_implicit_VR = False; ds.is_little_endian = True
+                    dst = out_dir / f"{count:05d}.dcm"
+                    ds.save_as(str(dst), write_like_original=False); count += 1
+                except Exception as e:
+                    on_log(f"[WARN] No reescrito {f.name}: {e}")
+        on_log(f"[INFO] Reescritos {count} DICOMs en {out_dir}")
         return out_dir if count > 0 else None
     except Exception as e:
-        on_log(f"[WARN] pydicom/pylibjpeg no disponibles para descomprimir: {e}")
+        on_log(f"[WARN] pydicom/pylibjpeg no disponibles: {e}")
         return None
 
 def convert_with_dicom2nifti_relaxed(input_dir: Path, out_dir: Path, on_log=print) -> Path | None:
@@ -195,7 +204,7 @@ def convert_with_dicom2nifti_relaxed(input_dir: Path, out_dir: Path, on_log=prin
                    'disable_validate_slice_increment','disable_validate_instance_number',
                    'disable_validate_woodpecker'):
             if hasattr(settings, fn): getattr(settings, fn)()
-        on_log("dicom2nifti (relajado): convirtiendo directorio…")
+        on_log("dicom2nifti (relajado): convirtiendo…")
         dicom2nifti.convert_directory(str(input_dir), str(out_dir),
                                       compression=True, reorient=True)
         nii = pick_largest_nii(out_dir)
@@ -204,44 +213,58 @@ def convert_with_dicom2nifti_relaxed(input_dir: Path, out_dir: Path, on_log=prin
     except Exception as e:
         on_log(f"dicom2nifti error: {e}")
         try:
-            tmp_dec = Path(tempfile.mkdtemp(prefix="ts_dec_"))
+            tmp_dec = out_dir.parent / f"ts_dec_{int(time.time()*1000)}"
             if decompress_series_with_pydicom(input_dir, tmp_dec, on_log=on_log):
-                on_log("Reintentando dicom2nifti sobre serie descomprimida…")
+                on_log("Reintento dicom2nifti sobre serie descomprimida…")
                 return convert_with_dicom2nifti_relaxed(tmp_dec, out_dir, on_log)
         except Exception:
             pass
         return None
 
-def robust_dicom_to_nifti(input_dir: Path, on_log=print) -> Path:
+def robust_dicom_to_nifti(input_dir: Path, work_tmp: Path, on_log=print) -> Path:
     best_dir = select_best_series(input_dir, on_log) or input_dir
-    tmp_out = Path(tempfile.mkdtemp(prefix="ts_conv_"))
+    tmp_out = work_tmp / f"ts_conv_{int(time.time()*1000)}"
     on_log(f"Conversión robusta a NIfTI en: {tmp_out}")
     nii = convert_with_dcm2niix(best_dir, tmp_out, on_log=on_log)
     if not nii: nii = convert_with_dicom2nifti_relaxed(best_dir, tmp_out, on_log=on_log)
-    if not nii: raise RuntimeError("Conversión robusta DICOM→NIfTI falló.")
+    if not nii: raise RuntimeError("Conversión DICOM→NIfTI falló.")
     return nii
 
-# --------------- Auto threads según VRAM/CPU --------------- #
+# ---------- Hilos ----------
 def suggest_threads(dev_info: dict) -> tuple[int, int]:
     cpu_count = max(os.cpu_count() or 2, 2)
     if dev_info.get("available"):
         vram = dev_info.get("vram_total_gb") or 0
         if vram >= 12: return (6,6)
-        elif vram >= 8: return (4,4)
-        elif vram >= 6: return (3,3)
-        elif vram >= 4: return (2,2)
-        else: return (1,1)
+        if vram >= 8:  return (4,4)
+        if vram >= 6:  return (3,3)
+        if vram >= 4:  return (2,2)
+        return (1,1)
     n = min(max(cpu_count // 2, 2), 8)
     return (n, n)
 
-# --------------- Ejecutor TotalSegmentator --------------- #
+# ---------- Runner (UTF-8 y limpieza ANSI) ----------
+_ansi_re = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+def _sanitize_line(s: str) -> str:
+    s = _ansi_re.sub("", s)
+    return s.replace("\r", "").rstrip("\n")
+
 def run_with_streaming(cmd, env, on_line) -> int:
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            universal_newlines=True, bufsize=1, env=env)
+    # Fuerza lectura en UTF-8 y evita exceptions con errors='replace'
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,                 # == universal_newlines=True
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+        env=env,
+    )
     for line in proc.stdout:
-        on_line(line.rstrip("\n"))
-    proc.wait()
-    return proc.returncode
+        on_line(_sanitize_line(line))
+    return proc.wait()
 
 def build_cmd_gpu(input_nii: Path, output_dir: Path, extra_flags: list[str], fast_gpu: bool) -> list[str]:
     cmd = ["TotalSegmentator","-i",str(input_nii),"-o",str(output_dir),"--task","total","--device","gpu"]
@@ -250,36 +273,25 @@ def build_cmd_gpu(input_nii: Path, output_dir: Path, extra_flags: list[str], fas
     return cmd
 
 def build_cmd_cpu(input_nii: Path, output_dir: Path, extra_flags: list[str]) -> list[str]:
-    cmd = ["TotalSegmentator","-i",str(input_nii),"-o",str(output_dir),"--task","total","--device","cpu"]
-    cmd += extra_flags  # sin --fast en CPU (requerimiento)
-    return cmd
+    return ["TotalSegmentator","-i",str(input_nii),"-o",str(output_dir),
+            "--task","total","--device","cpu", *extra_flags]
 
 def run_totalsegmentator_gpu_then_cpu(input_nii: Path, output_dir: Path,
                                       extra_flags: list[str], fast_gpu: bool, on_log):
     env = os.environ.copy()
-    env.setdefault("OMP_NUM_THREADS","1")
-    env.setdefault("OPENBLAS_NUM_THREADS","1")
-    env.setdefault("MKL_NUM_THREADS","1")
-    env.setdefault("NUMEXPR_NUM_THREADS","1")
-    default_tmp = r"D:\tmp\ts" if os.name == "nt" else "/tmp/ts"
-    safe_tmp = os.environ.get("TS_SAFE_TMP", default_tmp)
-    try:
-        Path(safe_tmp).mkdir(parents=True, exist_ok=True)
-        env.setdefault("TMP", safe_tmp); env.setdefault("TEMP", safe_tmp)
-    except Exception: pass
+    # Garantiza UTF-8 en subproceso Python (si TS corre como script Python)
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("PYTHONUTF8", "1")
 
-    # 1) Intento GPU (con o sin --fast)
     cmd_gpu = build_cmd_gpu(input_nii, output_dir, extra_flags, fast_gpu)
     on_log("GPU cmd: " + " ".join(shlex.quote(x) for x in cmd_gpu))
-    rc = run_with_streaming(cmd_gpu, env, on_line=lambda s: on_log(s))
+    rc = run_with_streaming(cmd_gpu, env, on_line=on_log)
     if rc == 0: return rc
-
-    # 2) Fallback CPU (si GPU falla) — SIEMPRE sin --fast
     env["CUDA_VISIBLE_DEVICES"] = "-1"
-    on_log(f"⚠️ Falló en GPU (rc={rc}). Reintentando en CPU (sin --fast)…")
+    on_log(f"⚠️ GPU rc={rc}. Reintento CPU (sin --fast)…")
     cmd_cpu = build_cmd_cpu(input_nii, output_dir, extra_flags)
     on_log("CPU cmd: " + " ".join(shlex.quote(x) for x in cmd_cpu))
-    return run_with_streaming(cmd_cpu, env, on_line=lambda s: on_log(s))
+    return run_with_streaming(cmd_cpu, env, on_line=on_log)
 
 def normalize_roi_subset_args(args: list[str]) -> list[str]:
     out = []; i = 0
@@ -289,76 +301,104 @@ def normalize_roi_subset_args(args: list[str]) -> list[str]:
             out.append(a); i += 1
             while i < len(args) and not args[i].startswith("--"):
                 token = args[i]
-                if "," in token: out.extend([t for t in token.split(",") if t])
-                else: out.append(token)
+                out.extend([t for t in token.split(",") if t]) if "," in token else out.append(token)
                 i += 1
             continue
         out.append(a); i += 1
     return out
 
+def preflight_or_fail(on_log):
+    if not shutil.which("TotalSegmentator"):
+        raise RuntimeError("No se encontró 'TotalSegmentator' en PATH.")
+    if not shutil.which("dcm2niix"):
+        on_log("[WARN] dcm2niix no encontrado. Se usará dicom2nifti (más lento).")
+
+def best_tmp_for(output_path: Path) -> Path:
+    """
+    Intenta crear tmp en el MISMO disco/volumen que la salida para minimizar I/O cruzado.
+    - Windows: misma unidad.
+    - POSIX: intenta en raíz del volumen; si no, cae a /tmp del sistema.
+    """
+    try:
+        out = output_path.resolve()
+    except Exception:
+        out = output_path
+
+    if os.name == "nt":
+        drive = out.drive or Path(tempfile.gettempdir()).drive or "C:"
+        base = Path(drive + "\\") / "_ts_tmp"
+    else:
+        # En Linux/macOS, intenta en el anchor; si falla por permisos, usa /tmp
+        anchor = out.anchor or "/"
+        base = Path(anchor) / "_ts_tmp"
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            base = Path(tempfile.gettempdir()) / "_ts_tmp"
+
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
 def run_pipeline(
     input_path: Path,
     output_path: Path,
     fast_gpu: bool,
-    only_statistics: bool,
     robust_import: bool,
+    dev_info: dict,
     on_log=print
 ) -> float:
-    """Ejecuta todo y devuelve la duración total en segundos."""
     t0 = time.perf_counter()
     start_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     ensure_dir(output_path)
     log_file = output_path / "run.log"
     def log(msg: str):
         on_log(msg)
-        with log_file.open("a", encoding="utf-8") as f:
-            f.write(msg + "\n")
+        with log_file.open("a", encoding="utf-8") as f: f.write(msg + "\n")
 
+    preflight_or_fail(log)
     log("=== Inicio TotalSegmentator (GPU→CPU, Ortopedia-only) ===")
     log(f"Inicio: {start_ts}")
-    dev = detect_device(); log(device_summary_text(dev))
+    log(device_summary_text(dev_info))
+
+    # TMP en disco de salida
+    tmp_root = best_tmp_for(output_path)
 
     # Import
-    true_input = input_path
-    temp_dir = None
-    if input_path.suffix.lower() == ".zip":
-        log("Descomprimiendo ZIP en temp…")
-        temp_dir = unzip_to_temp(input_path)
-        log(f"ZIP extraído en: {temp_dir}")
-        true_input = temp_dir
-    if not Path(true_input).exists():
-        raise FileNotFoundError(f"Entrada no encontrada: {true_input}")
+    true_input = Path(input_path)
+    temp_mount = None
+    try:
+        if true_input.suffix.lower() == ".zip":
+            log("Descomprimiendo ZIP…")
+            temp_mount = unzip_to_temp(true_input, tmp_root)
+            log(f"ZIP extraído en: {temp_mount}")
+            true_input = temp_mount
+        if not true_input.exists():
+            raise FileNotFoundError(f"Entrada no encontrada: {true_input}")
 
-    if is_nii(true_input):
-        nii_input = true_input; log(f"Entrada ya es NIfTI: {Path(nii_input).name}")
-    else:
-        if robust_import:
-            log("Conversión robusta DICOM→NIfTI…")
-            nii_input = robust_dicom_to_nifti(Path(true_input), on_log=log)
-            log(f"NIfTI intermedio: {nii_input}")
+        if is_nii(true_input):
+            nii_input = true_input; log(f"NIfTI: {nii_input.name}")
         else:
-            raise RuntimeError("Se requiere NIfTI o robust_import=True para DICOM.")
+            if robust_import:
+                log("Conversión robusta DICOM→NIfTI…")
+                nii_input = robust_dicom_to_nifti(true_input, tmp_root, on_log=log)
+                log(f"NIfTI intermedio: {nii_input}")
+            else:
+                raise RuntimeError("Se requiere NIfTI o robust_import=True para DICOM.")
 
-    # Flags fijos: ORTOPEDIA + auto hilos + opcional --statistics
-    extra_flags = ["--roi_subset"] + ORTHO_ROI
-    n_resamp, n_saving = suggest_threads(dev)
-    extra_flags += ["--nr_thr_resamp", str(n_resamp), "--nr_thr_saving", str(n_saving)]
-    log(f"[AUTO] Hilos sugeridos → resample={n_resamp} saving={n_saving}")
-    if only_statistics:
-        extra_flags += ["--statistics"]
+        # Flags fijos
+        extra_flags = ["--roi_subset", *ORTHO_ROI]
+        n_resamp, n_saving = suggest_threads(dev_info)
+        extra_flags += ["--nr_thr_resamp", str(n_resamp), "--nr_thr_saving", str(n_saving)]
+        extra_flags += ["--statistics"]  # SIEMPRE
+        extra_flags = normalize_roi_subset_args(extra_flags)
 
-    extra_flags = normalize_roi_subset_args(extra_flags)
-
-    # Ejecuta: GPU (fast opcional) -> CPU (sin fast) si falla
-    rc = run_totalsegmentator_gpu_then_cpu(
-        Path(nii_input), output_path, extra_flags, fast_gpu, on_log=log
-    )
-    if rc != 0:
-        raise RuntimeError("TotalSegmentator falló incluso tras fallback CPU.")
-
-    if temp_dir:
-        try: shutil.rmtree(temp_dir, ignore_errors=True); log(f"Temp eliminado: {temp_dir}")
-        except Exception as e: log(f"No se pudo borrar temp: {e}")
+        rc = run_totalsegmentator_gpu_then_cpu(Path(nii_input), output_path, extra_flags, fast_gpu, on_log=log)
+        if rc != 0:
+            raise RuntimeError("TotalSegmentator falló incluso tras fallback CPU.")
+    finally:
+        if temp_mount:
+            try: shutil.rmtree(temp_mount, ignore_errors=True); log(f"Temp eliminado: {temp_mount}")
+            except Exception as e: log(f"[WARN] No se pudo borrar temp: {e}")
 
     elapsed = time.perf_counter() - t0
     end_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -367,12 +407,34 @@ def run_pipeline(
     log("=== Fin ===")
     return elapsed
 
-# ---------------------- GUI ---------------------- #
-class TextRedirector:
-    def __init__(self, widget: tk.Text): self.widget = widget
-    def write(self, s): self.widget.after(0, self._append, s)
-    def flush(self): pass
-    def _append(self, s): self.widget.insert(tk.END, s); self.widget.see(tk.END)
+# ---------- UI ----------
+class BufferedLogger:
+    """Reduce llamadas a Tk: acumula y drena en lotes."""
+    def __init__(self, text_widget: tk.Text, flush_ms: int = 40):
+        self.text = text_widget
+        self.q = queue.Queue()
+        self.flush_ms = flush_ms
+        self.running = False
+
+    def start(self, root: tk.Tk):
+        if self.running: return
+        self.running = True
+        def _drain():
+            if not self.running: return
+            try:
+                chunks = []
+                while True:
+                    chunks.append(self.q.get_nowait())
+            except queue.Empty:
+                pass
+            if chunks:
+                self.text.insert(tk.END, "".join(chunks))
+                self.text.see(tk.END)
+            root.after(self.flush_ms, _drain)
+        root.after(self.flush_ms, _drain)
+
+    def stop(self): self.running = False
+    def write(self, s: str): self.q.put(s if s.endswith("\n") else s + "\n")
 
 class App(tk.Tk):
     def __init__(self):
@@ -382,17 +444,14 @@ class App(tk.Tk):
 
         self.input_path = tk.StringVar()
         self.output_dir = tk.StringVar()
-        # Toggles (solo estos dos)
-        self.fast_gpu = tk.BooleanVar(value=False)         # GPU --fast
-        self.only_statistics = tk.BooleanVar(value=False)  # --statistics
+        self.fast_gpu = tk.BooleanVar(value=False)
 
-        # Menú
-        self._build_menu()
+        self.dev_info = detect_device_once()
 
-        # Cabecera: device
+        # Header
         dev_frame = ttk.LabelFrame(self, text="Aceleración detectada")
         dev_frame.pack(fill="x", padx=10, pady=8)
-        self.dev_label = ttk.Label(dev_frame, text="Detectando dispositivo…")
+        self.dev_label = ttk.Label(dev_frame, text=device_summary_text(self.dev_info))
         self.dev_label.pack(anchor="w", padx=10, pady=6)
 
         # IO
@@ -409,15 +468,11 @@ class App(tk.Tk):
         ttk.Entry(r, textvariable=self.output_dir).pack(side="left", fill="x", expand=True, padx=8)
         ttk.Button(r, text="Elegir…", command=self.browse_output).pack(side="left")
 
-        # Opciones (solo dos)
+        # Opciones
         opts = ttk.LabelFrame(self, text="Opciones")
         opts.pack(fill="x", padx=10, pady=8)
-
-        r = ttk.Frame(opts); r.pack(fill="x", padx=10, pady=6)
-        ttk.Checkbutton(r, text="GPU --fast", variable=self.fast_gpu).pack(anchor="w")
-
-        r = ttk.Frame(opts); r.pack(fill="x", padx=10, pady=6)
-        ttk.Checkbutton(r, text="Solo estadísticas (--statistics)", variable=self.only_statistics).pack(anchor="w")
+        ttk.Checkbutton(opts, text="GPU --fast", variable=self.fast_gpu).pack(anchor="w")
+        ttk.Label(opts, text="Estadísticas: SIEMPRE activadas (--statistics)").pack(anchor="w", pady=(6,0))
 
         # Consola
         logf = ttk.LabelFrame(self, text="Consola / Log")
@@ -425,63 +480,25 @@ class App(tk.Tk):
         self.text = tk.Text(logf, height=22, wrap="word")
         self.text.pack(fill="both", expand=True, padx=6, pady=6)
 
-        # Barra de estado
-        self.status = ttk.Label(self, text="", relief="sunken", anchor="w")
+        # Estado
+        self.status = ttk.Label(self, text=device_summary_text(self.dev_info), relief="sunken", anchor="w")
         self.status.pack(fill="x", side="bottom")
 
-        # Redirección stdout
-        self._stdout_bak = sys.stdout
-        sys.stdout = TextRedirector(self.text)
-
-        # Mostrar dispositivo
-        self._show_device()
+        # Logger bufferizado
+        self.logger = BufferedLogger(self.text)
+        self.logger.start(self)
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
-        # Toolbar (botones)
+        # Toolbar
         toolbar = ttk.Frame(self); toolbar.pack(fill="x", padx=10, pady=8)
         ttk.Button(toolbar, text="Ejecutar", command=self.pick_and_run).pack(side="left")
         ttk.Button(toolbar, text="Limpiar log", command=self.clear_log).pack(side="left", padx=8)
 
-    # ----- Menú -----
-    def _build_menu(self):
-        menubar = tk.Menu(self)
-        m_sys = tk.Menu(menubar, tearoff=0)
-        m_sys.add_command(label="Re-escanear GPU", command=self._show_device)
-        m_sys.add_command(label="Copiar info GPU", command=self._copy_device_info)
-        m_sys.add_separator()
-        m_sys.add_command(label="Salir", command=self.on_close)
-        menubar.add_cascade(label="Sistema", menu=m_sys)
-
-        m_help = tk.Menu(menubar, tearoff=0)
-        m_help.add_command(label="Acerca de…", command=lambda: messagebox.showinfo(
-            "Acerca de",
-            "SOM3D - TotalSegmentator GUI (GPU→CPU, Ortopedia-only)\nAutor: José A. Carreño"
-        ))
-        menubar.add_cascade(label="Ayuda", menu=m_help)
-        self.config(menu=menubar)
-
-    def _copy_device_info(self):
-        dev = detect_device()
-        txt = device_summary_text(dev)
-        self.clipboard_clear(); self.clipboard_append(txt)
-        messagebox.showinfo("Copiado", "Información de GPU/CPU copiada al portapapeles.")
-        self._update_status_bar()
-
-    def _update_status_bar(self):
-        try:
-            self.status.config(text=device_summary_text(detect_device()))
-        except Exception:
-            pass
-
-    def _show_device(self):
-        self.dev_label.config(text=device_summary_text(detect_device()))
-        self._update_status_bar()
-
-    # ----- IO -----
+    # IO
     def browse_input(self):
         path = filedialog.askopenfilename(
-            title="Selecciona ZIP o NIfTI (o Cancela para elegir carpeta DICOM)",
+            title="Selecciona ZIP o NIfTI (o Cancela para carpeta DICOM)",
             filetypes=[("ZIP","*.zip"),("NIfTI","*.nii *.nii.gz"),("Todos","*.*")]
         )
         if path: self.input_path.set(path)
@@ -496,16 +513,15 @@ class App(tk.Tk):
     def clear_log(self): self.text.delete("1.0", tk.END)
 
     def on_close(self):
-        try: sys.stdout = self._stdout_bak
-        except Exception: pass
+        self.logger.stop()
         self.destroy()
 
-    # ----- Run -----
+    # Run
     def pick_and_run(self):
         in_path = self.input_path.get().strip()
         out_dir = self.output_dir.get().strip()
         if not in_path:
-            messagebox.showerror("Falta entrada", "Selecciona un archivo .zip/.nii o carpeta DICOM.")
+            messagebox.showerror("Falta entrada", "Selecciona .zip/.nii o carpeta DICOM.")
             return
         if not out_dir:
             messagebox.showerror("Falta salida", "Selecciona una carpeta de salida.")
@@ -515,32 +531,35 @@ class App(tk.Tk):
     def _start_worker(self, in_path: Path, out_dir: Path):
         t = threading.Thread(
             target=self._worker,
-            args=(in_path, out_dir, self.fast_gpu.get(), self.only_statistics.get()),
+            args=(in_path, out_dir, self.fast_gpu.get()),
             daemon=True
         )
         t.start()
 
-    def _worker(self, in_path: Path, out_dir: Path, fast_gpu: bool, only_statistics: bool):
+    def _worker(self, in_path: Path, out_dir: Path, fast_gpu: bool):
         try:
-            print("=== TotalSegmentator (GPU→CPU, Ortopedia-only) ===")
-            print(f"Entrada : {in_path}")
-            print(f"Salida  : {out_dir}")
-            print(f"GPU --fast        : {fast_gpu}")
-            print(f"Solo estadísticas : {only_statistics}")
+            self.logger.write("=== TotalSegmentator (GPU→CPU, Ortopedia-only) ===")
+            self.logger.write(f"Entrada : {in_path}")
+            self.logger.write(f"Salida  : {out_dir}")
+            self.logger.write(f"GPU --fast        : {fast_gpu}")
+            self.logger.write(f"Estadísticas      : SIEMPRE activadas (--statistics)")
+
+            def on_log(s: str): self.logger.write(s)
+
             elapsed = run_pipeline(
                 input_path=in_path,
                 output_path=out_dir,
                 fast_gpu=fast_gpu,
-                only_statistics=only_statistics,
                 robust_import=True,
-                on_log=lambda s: print(s)
+                dev_info=self.dev_info,
+                on_log=on_log
             )
             dur = format_duration(elapsed)
-            print(f"⏱ Duración total: {dur}")
+            self.logger.write(f"⏱ Duración total: {dur}")
             messagebox.showinfo("Completado", f"Segmentación terminada.\nDuración total: {dur}")
-            print("✔️ Listo. Revisa también 'run.log' en la salida.")
+            self.logger.write("✔️ Listo. Revisa también 'run.log'.")
         except Exception as e:
-            print(f"❌ Error: {e}")
+            self.logger.write(f"❌ Error: {e}")
             messagebox.showerror("Error", str(e))
 
 if __name__ == "__main__":

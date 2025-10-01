@@ -456,6 +456,24 @@ def run_pipeline(
         # Consolidar estadísticas del paso BODY
         merge_and_cleanup_stats(output_path, on_log=log)
 
+
+        # ===== Paso 3: HIP_IMPLANT (con estadísticas) =====
+        hip_flags = list(flags_common)  # incluye --statistics y hilos
+        flag(log, "TS", "Resumen HIP_IMPLANT",
+            f"task=hip_implant | out={output_path} | fast_gpu={fast_gpu} | stats=ON")
+
+        t0_hip = time.perf_counter()
+        rc_hip = run_totalsegmentator_gpu_then_cpu(
+            Path(nii_input), output_path, "hip_implant", hip_flags, fast_gpu, on_log=log
+        )
+        if rc_hip != 0:
+            raise RuntimeError("TotalSegmentator (HIP_IMPLANT) falló incluso tras fallback CPU.")
+        t_hip = time.perf_counter() - t0_hip
+        flag(log, "END|HIP_IMPLANT", "Duración", format_duration(t_hip))
+
+        # Consolidar estadísticas acumuladas (BODY + HIP_IMPLANT)
+        merge_and_cleanup_stats(output_path, on_log=log)
+
     finally:
         with step(log, "CLEANUP", "Eliminando temporales"):
             if temp_mount:

@@ -442,21 +442,6 @@ def run_pipeline(
         # Consolidar estadísticas del paso ORTO
         merge_and_cleanup_stats(output_path, on_log=log)
 
-        # ===== Paso 2: BODY (body + statistics) =====
-        # *** Importante: salida DIRECTA a la carpeta final (sin subcarpeta seg_body) ***
-        body_out = output_path
-        body_flags = list(flags_common)  # solo stats + hilos
-        flag(log, "TS", "Resumen BODY", f"task=body | out={body_out} | fast_gpu={fast_gpu} | stats=ON")
-        t0_body = time.perf_counter()
-        rc2 = run_totalsegmentator_gpu_then_cpu(Path(nii_input), body_out, "body", body_flags, fast_gpu, on_log=log)
-        if rc2 != 0:
-            raise RuntimeError("TotalSegmentator (BODY) falló incluso tras fallback CPU.")
-        t_body = time.perf_counter() - t0_body
-        flag(log, "END|BODY", "Duración", format_duration(t_body))
-        # Consolidar estadísticas del paso BODY
-        merge_and_cleanup_stats(output_path, on_log=log)
-
-
         # ===== Paso 3: HIP_IMPLANT (con estadísticas) =====
         hip_flags = list(flags_common)  # incluye --statistics y hilos
         flag(log, "TS", "Resumen HIP_IMPLANT",

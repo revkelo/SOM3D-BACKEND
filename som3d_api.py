@@ -3,22 +3,6 @@
 from __future__ import annotations
 from fastapi.responses import StreamingResponse, FileResponse  # añade FileResponse
 
-
-"""
-SOM3D Backend (TS → STL) con Jobs asíncronos, progreso y cancelación real.
-
-- POST /jobs                  -> crea un job (subes ZIP de DICOM)
-- GET  /jobs                  -> lista jobs (estado, % y paths)
-- GET  /jobs/{id}             -> detalle de un job (incluye tail de log)
-- GET  /jobs/{id}/progress    -> progreso resumido (fase, %, métricas y tail corto)
-- GET  /jobs/{id}/log?tail=N  -> últimas N líneas de log del job
-- GET  /jobs/{id}/result      -> descarga ZIP con STL (si ya terminó)
-- DELETE /jobs/{id}           -> cancela job (mata proceso y subprocesos)
-
-Ejecuta sin autoreload para evitar procesos zombies (en Windows):
-  uvicorn som3d_api:app --host 0.0.0.0 --port 8000 --reload=false
-"""
-
 import asyncio
 import io
 import os
@@ -32,12 +16,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from collections import deque
 
-import psutil  # <- IMPORTANTE para matar ?rbol de procesos
-
+import psutil  # <- IMPORTANTE para matar árbol de procesos
 from dotenv import load_dotenv, find_dotenv
-
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
-from fastapi.responses import StreamingResponse
 
 # ==== Importa tus clases (deben existir en el mismo directorio o en el PYTHONPATH)
 try:
@@ -55,12 +36,11 @@ dotenv_path = find_dotenv(usecwd=True)
 if dotenv_path:
     load_dotenv(dotenv_path, override=False)
 
-app = FastAPI(title="SOM3D Backend (TS → STL) con Jobs + Progreso + Cancelación", version="3.0.0")
+app = FastAPI(
+    title="SOM3D Backend (TS → STL) con Jobs + Progreso + Cancelación",
+    version="3.1.0"
+)
 
-
-# ==========================
-# Utilidades comunes
-# ==========================
 
 def _zip_dir_to_bytes(dir_path: Path) -> bytes:
     """Comprime un directorio a ZIP y lo devuelve como bytes (se apoya en un zip temporal)."""
@@ -167,7 +147,9 @@ def _worker_entry(
     zip_in: str,
     ts_out: str,
     stl_out: str,
-    fast_gpu: bool,
+    enable_ortopedia: bool,
+    enable_appendicular: bool,
+    enable_muscles: bool,
     enable_hip_implant: bool,
     extra_tasks: Optional[List[str]],
     log_path: str,
@@ -194,19 +176,17 @@ def _worker_entry(
     stl_out_p = Path(stl_out)
     zip_in_p = Path(zip_in)
 
-    # 1) TotalSegmentator
+    # 1) TotalSegmentator (sin --fast; GPU→CPU lo maneja el runner)
     wlog("Iniciando TotalSegmentator (worker)…")
-    runner = TotalSegmentatorRunner(fast_gpu=fast_gpu, robust_import=True)
-    if hasattr(runner, "enable_hip_implant"):
-        try:
-            setattr(runner, "enable_hip_implant", bool(enable_hip_implant))
-        except Exception:
-            pass
-    if extra_tasks and hasattr(runner, "set_extra_tasks"):
-        try:
-            runner.set_extra_tasks(extra_tasks)
-        except Exception:
-            pass
+    runner = TotalSegmentatorRunner(
+        robust_import=True,
+        enable_ortopedia=bool(enable_ortopedia),
+        enable_appendicular=bool(enable_appendicular),
+        enable_muscles=bool(enable_muscles),
+        enable_hip_implant=bool(enable_hip_implant),
+        extra_tasks=extra_tasks or [],
+        on_log=lambda s: wlog(s)  # duplica también a run.log del runner
+    )
 
     runner.run(zip_in_p, ts_out_p)
     wlog("TotalSegmentator finalizado (worker).")
@@ -227,6 +207,7 @@ def _worker_entry(
             log_name=None,
         )
     except TypeError:
+        # compatibilidad con firma antigua
         converter.convert_folder(
             nifti_root,
             stl_out_p,
@@ -299,8 +280,12 @@ async def health():
 @app.post("/jobs")
 async def create_job(
     file: UploadFile = File(..., description=".zip con DICOMs"),
-    fast_gpu: bool = Form(True),
+    # --- Nuevos toggles: por defecto solo ORTOPEDIA=ON; resto OFF ---
+    enable_ortopedia: bool = Form(True),
+    enable_appendicular: bool = Form(False),
+    enable_muscles: bool = Form(False),
     enable_hip_implant: bool = Form(False),
+    # Lista de tasks extra (separados por coma)
     extra_tasks: Optional[str] = Form(None),
 ):
     if not file.filename or not file.filename.lower().endswith(".zip"):
@@ -321,14 +306,22 @@ async def create_job(
                 break
             f.write(chunk)
 
-    extra_list = [t.strip() for t in extra_tasks.split(",")] if extra_tasks else None
+    extra_list = None
+    if extra_tasks:
+        extra_list = [t.strip() for t in extra_tasks.split(",") if t.strip()]
 
     job = Job(
         job_id=job_id,
         created_at=time.time(),
         updated_at=time.time(),
         status="running",
-        params={"fast_gpu": fast_gpu, "enable_hip_implant": enable_hip_implant, "extra_tasks": extra_list},
+        params={
+            "enable_ortopedia": enable_ortopedia,
+            "enable_appendicular": enable_appendicular,
+            "enable_muscles": enable_muscles,
+            "enable_hip_implant": enable_hip_implant,
+            "extra_tasks": extra_list,
+        },
         work_dir=work_dir,
         zip_in=zip_path,
         ts_out=ts_out,
@@ -349,7 +342,9 @@ async def create_job(
             str(zip_path),
             str(ts_out),
             str(stl_out),
-            fast_gpu,
+            enable_ortopedia,
+            enable_appendicular,
+            enable_muscles,
             enable_hip_implant,
             extra_list,
             str(job.log_path),

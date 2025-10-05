@@ -2,14 +2,15 @@
 # -*- coding: utf-8 -*-
 """
 SOM3D TotalSegmentator Runner (clase, sin GUI)
-- Siempre ejecuta ORTOPEDIA (task=total con --roi_subset óseo-articular + --statistics) [--fast SOLO aquí]
-- Luego ejecuta APPENDICULAR (task=appendicular_bones) sin --fast
-- HIP_IMPLANT habilitable/deshabilitable (sin --fast)
-- Permite tasks extra (p. ej. body, total_mr, lung_vessels, etc.) sin --fast
-- GPU→CPU fallback
-- Importación robusta: ZIP (DICOM), carpeta DICOM o NIfTI directo
+- ORTOPEDIA (task=total con --roi_subset óseo-articular + --statistics) [sin --fast]
+- APPENDICULAR (task=appendicular_bones) opcional, sin --fast
+- THIGH_SHOULDER_MUSCLES opcional, sin --fast
+- HIP_IMPLANT opcional, sin --fast
+- Tasks extra (p. ej. body, total_mr, lung_vessels, etc.) sin --fast (excluye reservados)
+- Política de ejecución: GPU primero; si falla, fallback CPU
+- Importación robusta: ZIP (DICOM), carpeta DICOM o NIfTI
 - Hilos sugeridos según VRAM/CPU
-- Logs tipo servidor a consola y a run.log en la carpeta de salida
+- Logs tipo servidor a consola y a run.log
 """
 from __future__ import annotations
 import os, shlex, zipfile, tempfile, subprocess, shutil, time, re, json
@@ -32,7 +33,7 @@ ORTHO_ROI: List[str] = [
 ]
 
 # Tasks gestionados internamente por el runner (no deben repetirse como "extras")
-RESERVED_TASKS = {"total","thigh_shoulder_muscles", "appendicular_bones", "hip_implant"}
+RESERVED_TASKS = {"total", "appendicular_bones", "thigh_shoulder_muscles", "hip_implant"}
 
 LICENSE_ENV_VARS: Tuple[str, ...] = ("TOTALSEG_LICENSE_KEY", "TOTALSEG_LICENSE")
 
@@ -83,16 +84,24 @@ def pick_largest_nii(folder: Path) -> Optional[Path]:
 class TotalSegmentatorRunner:
     def __init__(
         self,
-        fast_gpu: bool = False,                 # solo se aplicará al paso ORTOPEDIA
         robust_import: bool = True,
-        enable_hip_implant: bool = True,        # ON/OFF para hip_implant
-        extra_tasks: Optional[List[str]] = None,# p.ej. ["body","total_mr"]
+
+        # Toggles: por defecto SOLO ortopedia = True; los demás OFF
+        enable_ortopedia: bool = True,           # task=total con ORTHO_ROI
+        enable_appendicular: bool = False,       # task=appendicular_bones
+        enable_muscles: bool = False,            # task=thigh_shoulder_muscles
+        enable_hip_implant: bool = False,        # task=hip_implant
+
+        extra_tasks: Optional[List[str]] = None, # p.ej. ["body","total_mr"]
         on_log: Optional[Callable[[str], None]] = None
     ):
-        self.fast_gpu = fast_gpu
         self.robust_import = robust_import
+        self.enable_ortopedia = enable_ortopedia
+        self.enable_appendicular = enable_appendicular
+        self.enable_muscles = enable_muscles
         self.enable_hip_implant = enable_hip_implant
-        # Limpia y de-duplica extra tasks, excluyendo los reservados
+
+        # Limpia, de-duplica y excluye reservados
         cleaned: List[str] = []
         seen = set()
         for t in (extra_tasks or []):
@@ -101,6 +110,7 @@ class TotalSegmentatorRunner:
                 continue
             cleaned.append(t); seen.add(t)
         self.extra_tasks = cleaned
+
         self.on_log = on_log or (lambda s: print(s, flush=True))
         self.dev_info = self._detect_device_once()
         self._license_checked = False
@@ -362,29 +372,27 @@ class TotalSegmentatorRunner:
         return out
 
     @staticmethod
-    def _build_cmd_gpu(input_nii: Path, output_dir: Path, task: str, extra_flags: List[str], fast_gpu: bool) -> List[str]:
-        cmd = ["TotalSegmentator","-i",str(input_nii),"-o",str(output_dir),"--task",task,"--device","gpu"]
-        if fast_gpu: cmd.append("--fast")
-        cmd += extra_flags
-        return cmd
+    def _build_cmd_gpu(input_nii: Path, output_dir: Path, task: str, extra_flags: List[str]) -> List[str]:
+        # Sin --fast
+        return ["TotalSegmentator","-i",str(input_nii),"-o",str(output_dir),"--task",task,"--device","gpu", *extra_flags]
 
     @staticmethod
     def _build_cmd_cpu(input_nii: Path, output_dir: Path, task: str, extra_flags: List[str]) -> List[str]:
         return ["TotalSegmentator","-i",str(input_nii),"-o",str(output_dir),"--task",task,"--device","cpu", *extra_flags]
 
     def _run_totalseg_gpu_then_cpu(self, input_nii: Path, output_dir: Path,
-                                task: str, extra_flags: List[str], fast_gpu: bool) -> int:
+                                   task: str, extra_flags: List[str]) -> int:
         """
-        Política: SIEMPRE GPU primero (añade --fast si fast_gpu=True). 
-        Si el proceso en GPU devuelve rc != 0, intenta CPU. Sin manipular envs.
+        Política: SIEMPRE GPU primero (sin --fast).
+        Si el proceso en GPU devuelve rc != 0, intenta CPU.
         """
         env = os.environ.copy()
         env.setdefault("PYTHONIOENCODING", "utf-8")
         env.setdefault("PYTHONUTF8", "1")
         env.setdefault("TQDM_DISABLE", "1")
 
-        # 1) Intento en GPU (con o sin --fast según fast_gpu)
-        cmd_gpu = self._build_cmd_gpu(input_nii, output_dir, task, extra_flags, fast_gpu=fast_gpu)
+        # 1) Intento GPU
+        cmd_gpu = self._build_cmd_gpu(input_nii, output_dir, task, extra_flags)
         with self._step("TS|GPU", f"Ejecución {task}"):
             self._flag(self.on_log, "TS|GPU", "cmd", " ".join(shlex.quote(x) for x in cmd_gpu))
             rc = self._run_with_streaming(cmd_gpu, env, on_line=self.on_log)
@@ -392,14 +400,12 @@ class TotalSegmentatorRunner:
         if rc == 0:
             return rc
 
-        # 2) Fallback a CPU (solo si GPU falló)
+        # 2) Fallback CPU
         self._flag(self.on_log, "TS|GPU", f"rc={rc}", f"Fallback a CPU ({task})")
         cmd_cpu = self._build_cmd_cpu(input_nii, output_dir, task, extra_flags)
         with self._step("TS|CPU", f"Ejecución {task}"):
             self._flag(self.on_log, "TS|CPU", "cmd", " ".join(shlex.quote(x) for x in cmd_cpu))
             return self._run_with_streaming(cmd_cpu, env, on_line=self.on_log)
-
-
 
     # ---------- Stats ----------
     def _merge_and_cleanup_stats(self, out_dir: Path) -> None:
@@ -456,11 +462,12 @@ class TotalSegmentatorRunner:
     # ---------- API principal ----------
     def run(self, input_path: Path, output_path: Path) -> float:
         """
-        Ejecuta el pipeline:
-          1) ORTOPEDIA (task=total + --roi_subset ORTHO_ROI) [--fast si hay GPU]
-          2) APPENDICULAR (task=appendicular_bones), sin --fast
-          3) HIP_IMPLANT (si está habilitado), sin --fast
-          4) Tasks extra (si se definieron), sin --fast
+        Pipeline con toggles:
+          - ORTOPEDIA (task=total + --roi_subset ORTHO_ROI) [por defecto ON]
+          - THIGH_SHOULDER_MUSCLES (OFF por defecto)
+          - APPENDICULAR (OFF por defecto)
+          - HIP_IMPLANT (OFF por defecto)
+          - Extras (sin reservados)
         """
         t0_total = time.perf_counter()
         start_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -487,7 +494,7 @@ class TotalSegmentatorRunner:
         temp_mount = None
         try:
             self._preflight_or_fail()
-            self._flag(self.on_log, "START", "TotalSegmentator (GPU→CPU, Ortopedia→Appendicular)")
+            self._flag(self.on_log, "START", "TotalSegmentator (GPU→CPU)")
             self._flag(self.on_log, "START", "Inicio", start_ts)
             self._flag(self.on_log, "START", "Dispositivo", self._device_summary_text(self.dev_info))
 
@@ -525,65 +532,68 @@ class TotalSegmentatorRunner:
                 flags_common = ["--nr_thr_resamp",str(n_resamp),"--nr_thr_saving",str(n_saving)]
                 self._flag(self.on_log, "THREADS", "resample/saving", f"{n_resamp}/{n_saving}")
 
-            # 1) ORTOPEDIA (siempre)  --fast solo aquí
-            orto_flags = self._normalize_roi_subset_args(["--roi_subset", *ORTHO_ROI] + flags_common)
-            self._flag(self.on_log, "TS", "Resumen ORTO", f"task=total | fast_gpu={self.fast_gpu} | stats=ON")
-            t0_orto = time.perf_counter()
-            rc1 = self._run_totalseg_gpu_then_cpu(Path(nii_input), output_path, "total", orto_flags, self.fast_gpu)
-            if rc1 != 0:
-                raise RuntimeError("TotalSegmentator (ORTOPEDIA) falló incluso tras fallback CPU.")
-            t_orto = time.perf_counter() - t0_orto
-            self._flag(self.on_log, "END|ORTO", "Duración", format_duration(t_orto))
-            self._merge_and_cleanup_stats(output_path)
+            # 1) ORTOPEDIA (por defecto ON)
+            if self.enable_ortopedia:
+                orto_flags = self._normalize_roi_subset_args(["--roi_subset", *ORTHO_ROI] + flags_common)
+                self._flag(self.on_log, "TS", "Resumen ORTOPEDIA", f"task=total | stats=ON")
+                t0_orto = time.perf_counter()
+                rc1 = self._run_totalseg_gpu_then_cpu(Path(nii_input), output_path, "total", orto_flags)
+                if rc1 != 0:
+                    raise RuntimeError("TotalSegmentator (ORTOPEDIA) falló incluso tras fallback CPU.")
+                t_orto = time.perf_counter() - t0_orto
+                self._flag(self.on_log, "END|ORTOPEDIA", "Duración", format_duration(t_orto))
+                self._merge_and_cleanup_stats(output_path)
+            else:
+                self._flag(self.on_log, "TS", "ORTOPEDIA", "Deshabilitado")
 
-            tsm_flags = list(flags_common)
-            self._flag(self.on_log, "TS", "Resumen THIGH_SHOULDER_MUSCLES",
-                        f"task=thigh_shoulder_muscles | out={output_path} | fast_gpu=False | stats=ON")
-            t0_tsm = time.perf_counter()
-            rc_tsm = self._run_totalseg_gpu_then_cpu(Path(nii_input), output_path,
-                                                        "thigh_shoulder_muscles", tsm_flags, fast_gpu=False)
-            if rc_tsm != 0:
-                raise RuntimeError("TotalSegmentator (THIGH_SHOULDER_MUSCLES) falló incluso tras fallback CPU.")
-            t_tsm = time.perf_counter() - t0_tsm
-            self._flag(self.on_log, "END|THIGH_SHOULDER_MUSCLES", "Duración", format_duration(t_tsm))
-            self._merge_and_cleanup_stats(output_path)
+            # 2) MÚSCULOS (opcional)
+            if self.enable_muscles:
+                tsm_flags = list(flags_common)
+                self._flag(self.on_log, "TS", "Resumen THIGH_SHOULDER_MUSCLES", f"task=thigh_shoulder_muscles | stats=ON")
+                t0_tsm = time.perf_counter()
+                rc_tsm = self._run_totalseg_gpu_then_cpu(Path(nii_input), output_path, "thigh_shoulder_muscles", tsm_flags)
+                if rc_tsm != 0:
+                    raise RuntimeError("TotalSegmentator (THIGH_SHOULDER_MUSCLES) falló incluso tras fallback CPU.")
+                t_tsm = time.perf_counter() - t0_tsm
+                self._flag(self.on_log, "END|THIGH_SHOULDER_MUSCLES", "Duración", format_duration(t_tsm))
+                self._merge_and_cleanup_stats(output_path)
+            else:
+                self._flag(self.on_log, "TS", "THIGH_SHOULDER_MUSCLES", "Deshabilitado")
 
+            # 3) APPENDICULAR (opcional)
+            if self.enable_appendicular:
+                app_flags = list(flags_common)
+                self._flag(self.on_log, "TS", "Resumen APPENDICULAR", f"task=appendicular_bones | stats=ON")
+                t0_app = time.perf_counter()
+                rc_app = self._run_totalseg_gpu_then_cpu(Path(nii_input), output_path, "appendicular_bones", app_flags)
+                if rc_app != 0:
+                    raise RuntimeError("TotalSegmentator (APPENDICULAR) falló incluso tras fallback CPU.")
+                t_app = time.perf_counter() - t0_app
+                self._flag(self.on_log, "END|APPENDICULAR", "Duración", format_duration(t_app))
+                self._merge_and_cleanup_stats(output_path)
+            else:
+                self._flag(self.on_log, "TS", "APPENDICULAR", "Deshabilitado")
 
-
-            # 2) APPENDICULAR (siempre), sin --fast
-            app_flags = list(flags_common)
-            self._flag(self.on_log, "TS", "Resumen APPENDICULAR",
-                       f"task=appendicular_bones | out={output_path} | fast_gpu=False | stats=ON")
-            t0_app = time.perf_counter()
-            rc_app = self._run_totalseg_gpu_then_cpu(Path(nii_input), output_path, "appendicular_bones", app_flags, fast_gpu=False)
-            if rc_app != 0:
-                raise RuntimeError("TotalSegmentator (APPENDICULAR) falló incluso tras fallback CPU.")
-            t_app = time.perf_counter() - t0_app
-            self._flag(self.on_log, "END|APPENDICULAR", "Duración", format_duration(t_app))
-            self._merge_and_cleanup_stats(output_path)
-
-            # 3) HIP_IMPLANT (opcional), sin --fast
+            # 4) HIP_IMPLANT (opcional)
             if self.enable_hip_implant:
                 hip_flags = list(flags_common)
-                self._flag(self.on_log, "TS", "Resumen HIP_IMPLANT",
-                           f"task=hip_implant | out={output_path} | fast_gpu=False | stats=ON")
+                self._flag(self.on_log, "TS", "Resumen HIP_IMPLANT", f"task=hip_implant | stats=ON")
                 t0_hip = time.perf_counter()
-                rc_hip = self._run_totalseg_gpu_then_cpu(Path(nii_input), output_path, "hip_implant", hip_flags, fast_gpu=False)
+                rc_hip = self._run_totalseg_gpu_then_cpu(Path(nii_input), output_path, "hip_implant", hip_flags)
                 if rc_hip != 0:
                     raise RuntimeError("TotalSegmentator (HIP_IMPLANT) falló incluso tras fallback CPU.")
                 t_hip = time.perf_counter() - t0_hip
                 self._flag(self.on_log, "END|HIP_IMPLANT", "Duración", format_duration(t_hip))
                 self._merge_and_cleanup_stats(output_path)
             else:
-                self._flag(self.on_log, "TS", "HIP_IMPLANT", "Deshabilitado por configuración")
+                self._flag(self.on_log, "TS", "HIP_IMPLANT", "Deshabilitado")
 
-            # 4) Tasks extra (si los hay), sin --fast
+            # 5) Extras
             for tname in self.extra_tasks:
                 extra_flags = list(flags_common)
-                self._flag(self.on_log, "TS", "Resumen EXTRA",
-                           f"task={tname} | out={output_path} | fast_gpu=False | stats=ON")
+                self._flag(self.on_log, "TS", "Resumen EXTRA", f"task={tname} | stats=ON")
                 t0_ex = time.perf_counter()
-                rc_ex = self._run_totalseg_gpu_then_cpu(Path(nii_input), output_path, tname, extra_flags, fast_gpu=False)
+                rc_ex = self._run_totalseg_gpu_then_cpu(Path(nii_input), output_path, tname, extra_flags)
                 if rc_ex != 0:
                     raise RuntimeError(f"TotalSegmentator (task='{tname}') falló incluso tras fallback CPU.")
                 t_ex = time.perf_counter() - t0_ex
@@ -617,18 +627,49 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="SOM3D TotalSegmentator Runner (sin GUI)")
+
     parser.add_argument("input", type=str, help="Ruta de entrada: .zip (DICOM), carpeta DICOM o .nii/.nii.gz")
     parser.add_argument("output", type=str, help="Carpeta de salida")
-    # fast SOLO para ORTOPEDIA:
-    parser.add_argument("--fast-gpu", action="store_true", help="Usar --fast SOLO en ORTOPEDIA cuando haya GPU")
-    parser.add_argument("--no-robust", action="store_true", help="Desactivar importación robusta (requiere NIfTI)")
-    # HIP_IMPLANT toggle:
+
+    parser.add_argument("--no-robust", action="store_true",
+                        help="Desactivar importación robusta (requiere NIfTI)")
+
+    # --- Toggles ---
+    # ORTOPEDIA (ON por defecto)
+    orto_group = parser.add_mutually_exclusive_group()
+    orto_group.add_argument("--ortopedia", dest="ortopedia", action="store_true",
+                            help="Habilitar ORTOPEDIA (por defecto ON)")
+    orto_group.add_argument("--no-ortopedia", dest="ortopedia", action="store_false",
+                            help="Deshabilitar ORTOPEDIA")
+    parser.set_defaults(ortopedia=True)
+
+    # MÚSCULOS (OFF por defecto)
+    musc_group = parser.add_mutually_exclusive_group()
+    musc_group.add_argument("--muscles", dest="muscles", action="store_true",
+                            help="Habilitar THIGH_SHOULDER_MUSCLES (por defecto OFF)")
+    musc_group.add_argument("--no-muscles", dest="muscles", action="store_false",
+                            help="Deshabilitar THIGH_SHOULDER_MUSCLES")
+    parser.set_defaults(muscles=False)
+
+    # APPENDICULAR (OFF por defecto)
+    app_group = parser.add_mutually_exclusive_group()
+    app_group.add_argument("--appendicular", dest="appendicular", action="store_true",
+                           help="Habilitar APPENDICULAR (por defecto OFF)")
+    app_group.add_argument("--no-appendicular", dest="appendicular", action="store_false",
+                           help="Deshabilitar APPENDICULAR")
+    parser.set_defaults(appendicular=False)
+
+    # HIP_IMPLANT (OFF por defecto)
     hip_group = parser.add_mutually_exclusive_group()
-    hip_group.add_argument("--hip-implant", dest="hip_implant", action="store_true", help="Habilitar hip_implant (por defecto ON)")
-    hip_group.add_argument("--no-hip-implant", dest="hip_implant", action="store_false", help="Deshabilitar hip_implant")
-    parser.set_defaults(hip_implant=True)
-    # Tasks extra (puede repetirse):
-    parser.add_argument("--task", dest="tasks", action="append", default=[], help="Task extra (repetible), sin --fast")
+    hip_group.add_argument("--hip-implant", dest="hip_implant", action="store_true",
+                           help="Habilitar HIP_IMPLANT (por defecto OFF)")
+    hip_group.add_argument("--no-hip-implant", dest="hip_implant", action="store_false",
+                           help="Deshabilitar HIP_IMPLANT")
+    parser.set_defaults(hip_implant=False)
+
+    # Tasks extra (repetible):
+    parser.add_argument("--task", dest="tasks", action="append", default=[],
+                        help="Task extra (repetible), sin --fast. Se ignoran los tasks reservados.")
 
     args = parser.parse_args()
 
@@ -636,8 +677,10 @@ if __name__ == "__main__":
         print(line, flush=True)
 
     runner = TotalSegmentatorRunner(
-        fast_gpu=args.fast_gpu,
         robust_import=not args.no_robust,
+        enable_ortopedia=args.ortopedia,
+        enable_appendicular=args.appendicular,
+        enable_muscles=args.muscles,
         enable_hip_implant=args.hip_implant,
         extra_tasks=args.tasks,
         on_log=server_log

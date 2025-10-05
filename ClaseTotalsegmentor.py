@@ -522,7 +522,7 @@ class TotalSegmentatorRunner:
             # Hilos y flags comunes
             with self._step("THREADS", "Calculando hilos"):
                 n_resamp, n_saving = self._suggest_threads(self.dev_info)
-                flags_common = ["--statistics","--nr_thr_resamp",str(n_resamp),"--nr_thr_saving",str(n_saving)]
+                flags_common = ["--nr_thr_resamp",str(n_resamp),"--nr_thr_saving",str(n_saving)]
                 self._flag(self.on_log, "THREADS", "resample/saving", f"{n_resamp}/{n_saving}")
 
             # 1) ORTOPEDIA (siempre)  --fast solo aquí
@@ -535,6 +535,20 @@ class TotalSegmentatorRunner:
             t_orto = time.perf_counter() - t0_orto
             self._flag(self.on_log, "END|ORTO", "Duración", format_duration(t_orto))
             self._merge_and_cleanup_stats(output_path)
+
+            tsm_flags = list(flags_common)
+            self._flag(self.on_log, "TS", "Resumen THIGH_SHOULDER_MUSCLES",
+                        f"task=thigh_shoulder_muscles | out={output_path} | fast_gpu=False | stats=ON")
+            t0_tsm = time.perf_counter()
+            rc_tsm = self._run_totalseg_gpu_then_cpu(Path(nii_input), output_path,
+                                                        "thigh_shoulder_muscles", tsm_flags, fast_gpu=False)
+            if rc_tsm != 0:
+                raise RuntimeError("TotalSegmentator (THIGH_SHOULDER_MUSCLES) falló incluso tras fallback CPU.")
+            t_tsm = time.perf_counter() - t0_tsm
+            self._flag(self.on_log, "END|THIGH_SHOULDER_MUSCLES", "Duración", format_duration(t_tsm))
+            self._merge_and_cleanup_stats(output_path)
+
+
 
             # 2) APPENDICULAR (siempre), sin --fast
             app_flags = list(flags_common)

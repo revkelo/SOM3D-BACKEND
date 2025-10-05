@@ -32,7 +32,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from collections import deque
 
-import psutil  # <- IMPORTANTE para matar árbol de procesos
+import psutil  # <- IMPORTANTE para matar ?rbol de procesos
+
+from dotenv import load_dotenv, find_dotenv
 
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.responses import StreamingResponse
@@ -48,6 +50,10 @@ try:
 except Exception as e:
     raise RuntimeError("No se pudo importar NiftiToSTLConverter desde ClaseGenerator.py") from e
 
+
+dotenv_path = find_dotenv(usecwd=True)
+if dotenv_path:
+    load_dotenv(dotenv_path, override=False)
 
 app = FastAPI(title="SOM3D Backend (TS → STL) con Jobs + Progreso + Cancelación", version="3.0.0")
 

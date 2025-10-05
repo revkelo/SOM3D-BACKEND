@@ -31,6 +31,8 @@ ORTHO_ROI: List[str] = [
     "humerus_left","humerus_right","femur_left","femur_right","hip_left","hip_right",
 ]
 
+LICENSE_ENV_VARS: Tuple[str, ...] = ("TOTALSEG_LICENSE_KEY", "TOTALSEG_LICENSE")
+
 # Afinar BLAS para no sobrecargar
 os.environ.setdefault("OMP_NUM_THREADS","1")
 os.environ.setdefault("OPENBLAS_NUM_THREADS","1")
@@ -90,6 +92,7 @@ class TotalSegmentatorRunner:
         self.extra_tasks = list(extra_tasks) if extra_tasks else []
         self.on_log = on_log or (lambda s: print(s, flush=True))
         self.dev_info = self._detect_device_once()
+        self._license_checked = False
 
     # ---------- Logging ----------
     def _log(self, msg: str) -> None:
@@ -154,6 +157,44 @@ class TotalSegmentatorRunner:
             f"CUDA: {dev['cuda_version']} | GPUs: {dev['device_count']} | "
             f"Nombre: {dev['device_name']} | VRAM: {dev['vram_free_gb']}/{dev['vram_total_gb']} GB"
         )
+
+    @staticmethod
+    def _mask_license(value: str) -> str:
+        value = value.strip()
+        if len(value) <= 8:
+            return "*" * len(value)
+        return f"{value[:4]}{'*' * (len(value) - 8)}{value[-4:]}"
+
+    def _ensure_license(self) -> None:
+        if getattr(self, "_license_checked", False):
+            return
+        cmd_path = shutil.which("totalseg_set_license")
+        if not cmd_path:
+            raise RuntimeError("No se encontró 'totalseg_set_license' en PATH.")
+        license_key = None
+        env_used = None
+        for name in LICENSE_ENV_VARS:
+            candidate = os.environ.get(name)
+            if candidate:
+                license_key = candidate.strip()
+                env_used = name
+                break
+        if not license_key:
+            joined = ", ".join(LICENSE_ENV_VARS)
+            raise RuntimeError(f"No se definió la licencia en las variables de entorno: {joined}")
+        masked = self._mask_license(license_key)
+        self._flag(self.on_log, "LICENSE", "Aplicando", f"env={env_used} | valor={masked}")
+        try:
+            proc = subprocess.run([cmd_path, "-l", license_key], capture_output=True, text=True, check=False)
+        except Exception as exc:
+            raise RuntimeError(f"totalseg_set_license no pudo ejecutarse: {exc}") from exc
+        if proc.returncode != 0:
+            output = (proc.stderr or proc.stdout or "").strip()
+            raise RuntimeError(f"totalseg_set_license rc={proc.returncode}: {output}")
+        message = (proc.stdout or proc.stderr or "").strip()
+        if message:
+            self._flag(self.on_log, "LICENSE", "Respuesta", message)
+        self._license_checked = True
 
     # ---------- DICOM helpers ----------
     @staticmethod
@@ -373,6 +414,7 @@ class TotalSegmentatorRunner:
         with self._step("START", "Preflight"):
             if not shutil.which("TotalSegmentator"):
                 raise RuntimeError("No se encontró 'TotalSegmentator' en PATH.")
+            self._ensure_license()
 
     @staticmethod
     def _best_tmp_for(output_path: Path) -> Path:

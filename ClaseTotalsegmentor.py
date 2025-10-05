@@ -32,7 +32,7 @@ ORTHO_ROI: List[str] = [
 ]
 
 # Tasks gestionados internamente por el runner (no deben repetirse como "extras")
-RESERVED_TASKS = {"total", "appendicular_bones", "hip_implant"}
+RESERVED_TASKS = {"total","thigh_shoulder_muscles", "appendicular_bones", "hip_implant"}
 
 LICENSE_ENV_VARS: Tuple[str, ...] = ("TOTALSEG_LICENSE_KEY", "TOTALSEG_LICENSE")
 
@@ -373,28 +373,33 @@ class TotalSegmentatorRunner:
         return ["TotalSegmentator","-i",str(input_nii),"-o",str(output_dir),"--task",task,"--device","cpu", *extra_flags]
 
     def _run_totalseg_gpu_then_cpu(self, input_nii: Path, output_dir: Path,
-                                   task: str, extra_flags: List[str], fast_gpu: bool) -> int:
+                                task: str, extra_flags: List[str], fast_gpu: bool) -> int:
+        """
+        Política: SIEMPRE GPU primero (añade --fast si fast_gpu=True). 
+        Si el proceso en GPU devuelve rc != 0, intenta CPU. Sin manipular envs.
+        """
         env = os.environ.copy()
-        env.setdefault("PYTHONIOENCODING","utf-8")
-        env.setdefault("PYTHONUTF8","1")
-        env.setdefault("TQDM_DISABLE","1")
+        env.setdefault("PYTHONIOENCODING", "utf-8")
+        env.setdefault("PYTHONUTF8", "1")
+        env.setdefault("TQDM_DISABLE", "1")
 
-        if fast_gpu:
-            cmd = self._build_cmd_gpu(input_nii, output_dir, task, extra_flags, fast_gpu=True)
-            with self._step("TS|GPU", f"Ejecución {task}"):
-                self._flag(self.on_log, "TS|GPU", "cmd", " ".join(shlex.quote(x) for x in cmd))
-                rc = self._run_with_streaming(cmd, env, on_line=self.on_log)
-                self._flag(self.on_log, "TS|GPU", "rc", str(rc))
-            if rc == 0:
-                return rc
-            # fallback
-            env["CUDA_VISIBLE_DEVICES"] = "-1"
-            self._flag(self.on_log, "TS|GPU", f"rc={rc}", f"Fallback a CPU sin --fast ({task})")
+        # 1) Intento en GPU (con o sin --fast según fast_gpu)
+        cmd_gpu = self._build_cmd_gpu(input_nii, output_dir, task, extra_flags, fast_gpu=fast_gpu)
+        with self._step("TS|GPU", f"Ejecución {task}"):
+            self._flag(self.on_log, "TS|GPU", "cmd", " ".join(shlex.quote(x) for x in cmd_gpu))
+            rc = self._run_with_streaming(cmd_gpu, env, on_line=self.on_log)
+            self._flag(self.on_log, "TS|GPU", "rc", str(rc))
+        if rc == 0:
+            return rc
 
+        # 2) Fallback a CPU (solo si GPU falló)
+        self._flag(self.on_log, "TS|GPU", f"rc={rc}", f"Fallback a CPU ({task})")
         cmd_cpu = self._build_cmd_cpu(input_nii, output_dir, task, extra_flags)
         with self._step("TS|CPU", f"Ejecución {task}"):
             self._flag(self.on_log, "TS|CPU", "cmd", " ".join(shlex.quote(x) for x in cmd_cpu))
             return self._run_with_streaming(cmd_cpu, env, on_line=self.on_log)
+
+
 
     # ---------- Stats ----------
     def _merge_and_cleanup_stats(self, out_dir: Path) -> None:

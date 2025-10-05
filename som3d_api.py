@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 from __future__ import annotations
+from fastapi.responses import StreamingResponse, FileResponse  # añade FileResponse
+
 
 """
 SOM3D Backend (TS → STL) con Jobs asíncronos, progreso y cancelación real.
@@ -440,9 +442,12 @@ async def get_result(job_id: str):
         raise HTTPException(status_code=404, detail="Job no encontrado")
     if job.status != "done" or not job.result_zip or not job.result_zip.exists():
         raise HTTPException(status_code=409, detail="Resultado no disponible aún")
-    headers = {"Content-Disposition": f"attachment; filename={job.result_zip.name}"}
-    data = job.result_zip.read_bytes()
-    return StreamingResponse(_iter_file_bytes(data), media_type="application/zip", headers=headers)
+
+    return FileResponse(
+        job.result_zip,
+        media_type="application/zip",
+        filename=job.result_zip.name,  # Content-Disposition correcto
+    )
 
 
 @app.delete("/jobs/{job_id}")

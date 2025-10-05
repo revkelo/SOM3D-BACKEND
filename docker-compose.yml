@@ -1,0 +1,21 @@
+services:
+  som3d:
+    build:
+      context: .
+      target: gpu   # cambia a "cpu" si quieres forzar CPU
+    image: som3d:gpu
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data
+    # Compose moderno admite esto:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: ["gpu"]
+    # En Docker Compose no-swarm es mejor:
+    gpus: "all"
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility

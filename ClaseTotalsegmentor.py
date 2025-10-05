@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 """
 SOM3D TotalSegmentator Runner (clase, sin GUI)
-- Siempre ejecuta ORTOPEDIA (task=total con --roi_subset óseo-articular + --statistics)
-- HIP_IMPLANT habilitable/deshabilitable
-- --fast SOLO aplica al paso ORTOPEDIA (nunca a hip_implant ni a otros tasks)
+- Siempre ejecuta ORTOPEDIA (task=total con --roi_subset óseo-articular + --statistics) [--fast SOLO aquí]
+- Luego ejecuta APPENDICULAR (task=appendicular_bones) sin --fast
+- HIP_IMPLANT habilitable/deshabilitable (sin --fast)
 - Permite tasks extra (p. ej. body, total_mr, lung_vessels, etc.) sin --fast
 - GPU→CPU fallback
 - Importación robusta: ZIP (DICOM), carpeta DICOM o NIfTI directo
@@ -30,6 +30,9 @@ ORTHO_ROI: List[str] = [
     "clavicula_left","clavicula_right","scapula_left","scapula_right",
     "humerus_left","humerus_right","femur_left","femur_right","hip_left","hip_right",
 ]
+
+# Tasks gestionados internamente por el runner (no deben repetirse como "extras")
+RESERVED_TASKS = {"total", "appendicular_bones", "hip_implant"}
 
 LICENSE_ENV_VARS: Tuple[str, ...] = ("TOTALSEG_LICENSE_KEY", "TOTALSEG_LICENSE")
 
@@ -89,7 +92,15 @@ class TotalSegmentatorRunner:
         self.fast_gpu = fast_gpu
         self.robust_import = robust_import
         self.enable_hip_implant = enable_hip_implant
-        self.extra_tasks = list(extra_tasks) if extra_tasks else []
+        # Limpia y de-duplica extra tasks, excluyendo los reservados
+        cleaned: List[str] = []
+        seen = set()
+        for t in (extra_tasks or []):
+            t = (t or "").strip()
+            if not t or t in RESERVED_TASKS or t in seen:
+                continue
+            cleaned.append(t); seen.add(t)
+        self.extra_tasks = cleaned
         self.on_log = on_log or (lambda s: print(s, flush=True))
         self.dev_info = self._detect_device_once()
         self._license_checked = False
@@ -368,16 +379,18 @@ class TotalSegmentatorRunner:
         env.setdefault("PYTHONUTF8","1")
         env.setdefault("TQDM_DISABLE","1")
 
-        cmd_gpu = self._build_cmd_gpu(input_nii, output_dir, task, extra_flags, fast_gpu)
-        with self._step("TS|GPU", f"Ejecución {task}"):
-            self._flag(self.on_log, "TS|GPU", "cmd", " ".join(shlex.quote(x) for x in cmd_gpu))
-            rc = self._run_with_streaming(cmd_gpu, env, on_line=self.on_log)
-            self._flag(self.on_log, "TS|GPU", "rc", str(rc))
-        if rc == 0:
-            return rc
+        if fast_gpu:
+            cmd = self._build_cmd_gpu(input_nii, output_dir, task, extra_flags, fast_gpu=True)
+            with self._step("TS|GPU", f"Ejecución {task}"):
+                self._flag(self.on_log, "TS|GPU", "cmd", " ".join(shlex.quote(x) for x in cmd))
+                rc = self._run_with_streaming(cmd, env, on_line=self.on_log)
+                self._flag(self.on_log, "TS|GPU", "rc", str(rc))
+            if rc == 0:
+                return rc
+            # fallback
+            env["CUDA_VISIBLE_DEVICES"] = "-1"
+            self._flag(self.on_log, "TS|GPU", f"rc={rc}", f"Fallback a CPU sin --fast ({task})")
 
-        env["CUDA_VISIBLE_DEVICES"] = "-1"
-        self._flag(self.on_log, "TS|GPU", f"rc={rc}", f"Fallback a CPU sin --fast ({task})")
         cmd_cpu = self._build_cmd_cpu(input_nii, output_dir, task, extra_flags)
         with self._step("TS|CPU", f"Ejecución {task}"):
             self._flag(self.on_log, "TS|CPU", "cmd", " ".join(shlex.quote(x) for x in cmd_cpu))
@@ -440,8 +453,9 @@ class TotalSegmentatorRunner:
         """
         Ejecuta el pipeline:
           1) ORTOPEDIA (task=total + --roi_subset ORTHO_ROI) [--fast si hay GPU]
-          2) HIP_IMPLANT (si está habilitado), sin --fast
-          3) Tasks extra (si se definieron), sin --fast
+          2) APPENDICULAR (task=appendicular_bones), sin --fast
+          3) HIP_IMPLANT (si está habilitado), sin --fast
+          4) Tasks extra (si se definieron), sin --fast
         """
         t0_total = time.perf_counter()
         start_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -468,7 +482,7 @@ class TotalSegmentatorRunner:
         temp_mount = None
         try:
             self._preflight_or_fail()
-            self._flag(self.on_log, "START", "TotalSegmentator (GPU→CPU, Ortopedia obligatoria)")
+            self._flag(self.on_log, "START", "TotalSegmentator (GPU→CPU, Ortopedia→Appendicular)")
             self._flag(self.on_log, "START", "Inicio", start_ts)
             self._flag(self.on_log, "START", "Dispositivo", self._device_summary_text(self.dev_info))
 
@@ -517,7 +531,19 @@ class TotalSegmentatorRunner:
             self._flag(self.on_log, "END|ORTO", "Duración", format_duration(t_orto))
             self._merge_and_cleanup_stats(output_path)
 
-            # 2) HIP_IMPLANT (opcional), sin --fast
+            # 2) APPENDICULAR (siempre), sin --fast
+            app_flags = list(flags_common)
+            self._flag(self.on_log, "TS", "Resumen APPENDICULAR",
+                       f"task=appendicular_bones | out={output_path} | fast_gpu=False | stats=ON")
+            t0_app = time.perf_counter()
+            rc_app = self._run_totalseg_gpu_then_cpu(Path(nii_input), output_path, "appendicular_bones", app_flags, fast_gpu=False)
+            if rc_app != 0:
+                raise RuntimeError("TotalSegmentator (APPENDICULAR) falló incluso tras fallback CPU.")
+            t_app = time.perf_counter() - t0_app
+            self._flag(self.on_log, "END|APPENDICULAR", "Duración", format_duration(t_app))
+            self._merge_and_cleanup_stats(output_path)
+
+            # 3) HIP_IMPLANT (opcional), sin --fast
             if self.enable_hip_implant:
                 hip_flags = list(flags_common)
                 self._flag(self.on_log, "TS", "Resumen HIP_IMPLANT",
@@ -532,11 +558,8 @@ class TotalSegmentatorRunner:
             else:
                 self._flag(self.on_log, "TS", "HIP_IMPLANT", "Deshabilitado por configuración")
 
-            # 3) Tasks extra (si los hay), sin --fast
+            # 4) Tasks extra (si los hay), sin --fast
             for tname in self.extra_tasks:
-                tname = (tname or "").strip()
-                if not tname:
-                    continue
                 extra_flags = list(flags_common)
                 self._flag(self.on_log, "TS", "Resumen EXTRA",
                            f"task={tname} | out={output_path} | fast_gpu=False | stats=ON")

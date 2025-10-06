@@ -20,6 +20,9 @@ import psutil  # <- IMPORTANTE para matar árbol de procesos
 from dotenv import load_dotenv, find_dotenv
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 
+# === NUEVO: para especificar SIEMPRE el porqué del error
+import json, traceback  # NEW
+
 # ==== Importa tus clases (deben existir en el mismo directorio o en el PYTHONPATH)
 try:
     from ClaseTotalsegmentor import TotalSegmentatorRunner  # type: ignore
@@ -171,62 +174,105 @@ def _worker_entry(
         except Exception:
             pass
 
+    def _save_worker_error(job_dir_p: Path, phase_name: str, exc: BaseException):
+        err = {
+            "phase": phase_name,
+            "exc_type": type(exc).__name__,
+            "message": str(exc),
+            "traceback": traceback.format_exc(),
+        }
+        try:
+            (job_dir_p / "worker_error.json").write_text(
+                json.dumps(err, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception:
+            try:
+                (job_dir_p / "worker_error.txt").write_text(
+                    f"{phase_name}: {type(exc).__name__}: {exc}\n{traceback.format_exc()}",
+                    encoding="utf-8"
+                )
+            except Exception:
+                pass
+
     job_dir_p = Path(job_dir)
     ts_out_p = Path(ts_out)
     stl_out_p = Path(stl_out)
     zip_in_p = Path(zip_in)
 
-    # 1) TotalSegmentator (sin --fast; GPU→CPU lo maneja el runner)
-    wlog("Iniciando TotalSegmentator (worker)…")
-    runner = TotalSegmentatorRunner(
-        robust_import=True,
-        enable_ortopedia=bool(enable_ortopedia),
-        enable_appendicular=bool(enable_appendicular),
-        enable_muscles=bool(enable_muscles),
-        enable_hip_implant=bool(enable_hip_implant),
-        extra_tasks=extra_tasks or [],
-        on_log=lambda s: wlog(s)  # duplica también a run.log del runner
-    )
-
-    runner.run(zip_in_p, ts_out_p)
-    wlog("TotalSegmentator finalizado (worker).")
-
-    # 2) Conversión NIfTI→STL
-    wlog("Convirtiendo NIfTI a STL (worker)…")
-    converter = NiftiToSTLConverter()
-    nifti_root = _collect_nifti_root(ts_out_p)
+    phase = "start"
     try:
-        converter.convert_folder(
-            input_dir=nifti_root,
-            output_dir=stl_out_p,
-            recursive=True,
-            clip_min=None,
-            clip_max=None,
-            exclude_zeros=True,
-            min_voxels=10,
-            log_name=None,
+        # 1) TotalSegmentator (sin --fast; GPU→CPU lo maneja el runner)
+        phase = "totalsegmentator"
+        wlog("Iniciando TotalSegmentator …")
+        runner = TotalSegmentatorRunner(
+            robust_import=True,
+            enable_ortopedia=bool(enable_ortopedia),
+            enable_appendicular=bool(enable_appendicular),
+            enable_muscles=bool(enable_muscles),
+            enable_hip_implant=bool(enable_hip_implant),
+            extra_tasks=extra_tasks or [],
+            on_log=lambda s: wlog(s)
         )
-    except TypeError:
-        # compatibilidad con firma antigua
-        converter.convert_folder(
-            nifti_root,
-            stl_out_p,
-            True,
-            None,
-            None,
-            True,
-            10,
-            None,
-        )
-    wlog("Conversión a STL finalizada (worker).")
+        runner.run(zip_in_p, ts_out_p)
+        wlog("TotalSegmentator finalizado .")
 
-    # 3) ZIP resultado
-    wlog("Empaquetando STL en ZIP (worker)…")
-    data = _zip_dir_to_bytes(stl_out_p)
-    out_zip = job_dir_p / "stl_result.zip"
-    with out_zip.open("wb") as f:
-        f.write(data)
-    wlog("ZIP finalizado (worker).")
+        # 2) Conversión NIfTI→STL
+        phase = "convert_to_stl"
+        wlog("Convirtiendo NIfTI a STL …")
+
+        def _log_to_job(msg: str):
+            try:
+                if not msg.endswith("\n"):
+                    msg += "\n"
+                wlog(msg.rstrip("\n"))
+            except Exception:
+                pass
+
+        converter = NiftiToSTLConverter(progress_cb=_log_to_job)
+        nifti_root = _collect_nifti_root(ts_out_p)
+        try:
+            converter.convert_folder(
+                input_dir=nifti_root,
+                output_dir=stl_out_p,
+                recursive=True,
+                clip_min=None,
+                clip_max=None,
+                exclude_zeros=True,
+                min_voxels=10,
+                log_name=None,
+            )
+        except TypeError:
+            # compatibilidad con firma antigua
+            converter.convert_folder(
+                nifti_root,
+                stl_out_p,
+                True,
+                None,
+                None,
+                True,
+                10,
+                None,
+            )
+        wlog("Conversión a STL finalizada .")
+
+    except Exception as e:
+        wlog(f"WORKER ERROR en fase '{phase}': {type(e).__name__}: {e}")
+        _save_worker_error(job_dir_p, phase, e)
+
+    finally:
+        # 3) ZIP resultado (siempre intentar, aun con errores o sin STLs)
+        phase = "zip_result"
+        try:
+            wlog("Empaquetando STL en ZIP …")
+            stl_out_p.mkdir(parents=True, exist_ok=True)
+            data = _zip_dir_to_bytes(stl_out_p)
+            out_zip = job_dir_p / "stl_result.zip"
+            with out_zip.open("wb") as f:
+                f.write(data)
+            wlog("ZIP finalizado .")
+        except Exception as z:
+            wlog(f"ZIP ERROR: {type(z).__name__}: {z}")
+            _save_worker_error(job_dir_p, phase, z)
 
 
 # ==========================
@@ -371,6 +417,7 @@ async def create_job(
                 job.status = "canceled"
                 job.phase = "canceled"
                 job.percent = min(job.percent, 99.0)
+                job.error = "Cancelado por el usuario"
                 job.log("Job cancelado (monitor).")
             else:
                 out_zip = work_dir / "stl_result.zip"
@@ -379,11 +426,35 @@ async def create_job(
                     job.status = "done"
                     job.phase = "finished"
                     job.percent = 100.0
+                    job.error = None
                     job.log("Job finalizado correctamente (monitor).")
                 else:
+                    # Buscar detalle de error generado por el worker
+                    specific = None
+                    err_json = work_dir / "worker_error.json"
+                    err_txt  = work_dir / "worker_error.txt"
+                    if err_json.exists():
+                        try:
+                            data = json.loads(err_json.read_text(encoding="utf-8"))
+                            phase = data.get("phase")
+                            etype = data.get("exc_type")
+                            msg   = data.get("message")
+                            specific = f"{etype}: {msg} (fase: {phase})"
+                        except Exception:
+                            pass
+                    if not specific and err_txt.exists():
+                        try:
+                            first = err_txt.read_text(encoding="utf-8", errors="ignore").splitlines()[0]
+                            specific = first.strip()
+                        except Exception:
+                            pass
+                    if not specific:
+                        specific = "No se generó ZIP y no hay detalle en worker_error.* (revisa el log)."
+
                     job.status = "error"
                     job.phase = "error"
-                    job.log("Job terminó sin ZIP final. Posible error en worker.")
+                    job.error = specific
+                    job.log(f"Job terminó con ERROR: {specific}")
 
     job.monitor_task = asyncio.create_task(_monitor())
 
@@ -415,6 +486,7 @@ async def job_progress(job_id: str):
         "percent": round(float(job.percent), 1),
         "metrics": job.metrics,
         "message": (job._tail[-1] if len(job._tail) else None),
+        "error": job.error,  # NEW: devuelve el motivo exacto si hay error
         "log_tail": list(job._tail)[-20:],
     }
 
@@ -442,7 +514,9 @@ async def get_result(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Job no encontrado")
     if job.status != "done" or not job.result_zip or not job.result_zip.exists():
-        raise HTTPException(status_code=409, detail="Resultado no disponible aún")
+        # NEW: especifica el porqué si hay error
+        detail = job.error or "Resultado no disponible aún"
+        raise HTTPException(status_code=409, detail=detail)
 
     return FileResponse(
         job.result_zip,
@@ -499,6 +573,7 @@ async def cancel_job(job_id: str):
     job.status = "canceled"
     job.phase = "canceled"
     job.percent = min(job.percent, 99.0)
+    job.error = "Cancelado por el usuario"
     job.log("Job cancelado.")
 
     # 3) Limpieza de disco (opcional; comenta si quieres conservar para debug)

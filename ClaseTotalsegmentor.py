@@ -2,15 +2,16 @@
 # -*- coding: utf-8 -*-
 """
 SOM3D TotalSegmentator Runner (clase, sin GUI)
-- ORTOPEDIA (task=total con --roi_subset óseo-articular + --statistics) [sin --fast]
+- ORTOPEDIA (task=total con --roi_subset óseo-articular  [sin --fast]
 - APPENDICULAR (task=appendicular_bones) opcional, sin --fast
 - THIGH_SHOULDER_MUSCLES opcional, sin --fast
 - HIP_IMPLANT opcional, sin --fast
-- Tasks extra (p. ej. body, total_mr, lung_vessels, etc.) sin --fast (excluye reservados)
+- Tasks extra (p. ej. body, total_mr, lung_vessels, teeth, craniofacial_structures, etc.) sin --fast (excluye reservados)
 - Política de ejecución: GPU primero; si falla, fallback CPU
 - Importación robusta: ZIP (DICOM), carpeta DICOM o NIfTI
 - Hilos sugeridos según VRAM/CPU
 - Logs tipo servidor a consola y a run.log
+- Post-proceso cráneo: borrar head.*; si también corre teeth, borrar teeth_lower.* y teeth_upper.* del resultado de cráneo
 """
 from __future__ import annotations
 import os, shlex, zipfile, tempfile, subprocess, shutil, time, re, json
@@ -36,6 +37,10 @@ ORTHO_ROI: List[str] = [
 RESERVED_TASKS = {"total", "appendicular_bones", "thigh_shoulder_muscles", "hip_implant"}
 
 LICENSE_ENV_VARS: Tuple[str, ...] = ("TOTALSEG_LICENSE_KEY", "TOTALSEG_LICENSE")
+
+# Presets rápidos para flags directos
+TEETH_TASKS = ["teeth"]
+CRANIO_TASKS = ["craniofacial_structures"]
 
 # Afinar BLAS para no sobrecargar
 os.environ.setdefault("OMP_NUM_THREADS","1")
@@ -80,6 +85,29 @@ def pick_largest_nii(folder: Path) -> Optional[Path]:
                 largest_size = s
     return largest
 
+def merge_tasks(user_tasks: Optional[List[str]], add_tasks: Optional[List[str]]) -> List[str]:
+    """Fusiona listas de tasks, quita duplicados y tasks reservados."""
+    merged: List[str] = []
+    seen = set()
+    for t in (add_tasks or []) + (user_tasks or []):
+        t = (t or "").strip()
+        if not t or t in RESERVED_TASKS or t in seen:
+            continue
+        merged.append(t); seen.add(t)
+    return merged
+
+# >>> NUEVO: util para borrar archivos por "stem" con .nii / .nii.gz
+def _delete_outputs_by_stem(out_dir: Path, stems: List[str], on_log: Callable[[str], None]) -> None:
+    for stem in stems:
+        for suffix in (".nii.gz", ".nii"):
+            p = out_dir / f"{stem}{suffix}"
+            if p.exists():
+                try:
+                    p.unlink()
+                    on_log(f"[POST] Borrado: {p.name}")
+                except Exception as e:
+                    on_log(f"[POST] WARN no se pudo borrar {p.name}: {e}")
+
 # ---------- Clase principal ----------
 class TotalSegmentatorRunner:
     def __init__(
@@ -92,7 +120,7 @@ class TotalSegmentatorRunner:
         enable_muscles: bool = False,            # task=thigh_shoulder_muscles
         enable_hip_implant: bool = False,        # task=hip_implant
 
-        extra_tasks: Optional[List[str]] = None, # p.ej. ["body","total_mr"]
+        extra_tasks: Optional[List[str]] = None, # p.ej. ["body","total_mr","teeth","craniofacial_structures"]
         on_log: Optional[Callable[[str], None]] = None
     ):
         self.robust_import = robust_import
@@ -109,7 +137,19 @@ class TotalSegmentatorRunner:
             if not t or t in RESERVED_TASKS or t in seen:
                 continue
             cleaned.append(t); seen.add(t)
-        self.extra_tasks = cleaned
+
+        # >>> NUEVO: asegurar orden: primero cranio, después teeth (si ambos existen)
+        def _reorder_extras(lst: List[str]) -> List[str]:
+            has_cranio = "craniofacial_structures" in lst
+            has_teeth  = "teeth" in lst
+            if has_cranio and has_teeth:
+                lst2 = [x for x in lst if x not in ("craniofacial_structures", "teeth")]
+                lst2.insert(0, "craniofacial_structures")
+                lst2.insert(1, "teeth")
+                return lst2
+            return lst
+
+        self.extra_tasks = _reorder_extras(cleaned)
 
         self.on_log = on_log or (lambda s: print(s, flush=True))
         self.dev_info = self._detect_device_once()
@@ -405,7 +445,9 @@ class TotalSegmentatorRunner:
         cmd_cpu = self._build_cmd_cpu(input_nii, output_dir, task, extra_flags)
         with self._step("TS|CPU", f"Ejecución {task}"):
             self._flag(self.on_log, "TS|CPU", "cmd", " ".join(shlex.quote(x) for x in cmd_cpu))
-            return self._run_with_streaming(cmd_cpu, env, on_line=self.on_log)
+            rc2 = self._run_with_streaming(cmd_cpu, env, on_line=self.on_log)
+            self._flag(self.on_log, "TS|CPU", "rc", str(rc2))
+            return rc2
 
     # ---------- Stats ----------
     def _merge_and_cleanup_stats(self, out_dir: Path) -> None:
@@ -432,6 +474,20 @@ class TotalSegmentatorRunner:
             self._flag(self.on_log, "STATS", "Consolidado", "statistics_all.json (borrado statistics.json)")
         except Exception:
             pass
+
+    # >>> NUEVO: post-proceso específico para cranio
+    def _postprocess_cranio_outputs(self, out_dir: Path, will_run_teeth: bool) -> None:
+        """
+        Reglas:
+          - Borrar siempre head.*
+          - Si también se corre 'teeth', borrar teeth_lower.* y teeth_upper.* (cranio las produce).
+            Luego el task 'teeth' regenerará sus propios archivos definitivos.
+        """
+        self._flag(self.on_log, "POST", "Cráneo", "Limpieza selectiva")
+        stems = ["head"]
+        if will_run_teeth:
+            stems += ["teeth_lower", "teeth_upper"]
+        _delete_outputs_by_stem(out_dir, stems, self.on_log)
 
     # ---------- Preflight & tmp ----------
     def _preflight_or_fail(self) -> None:
@@ -492,6 +548,7 @@ class TotalSegmentatorRunner:
         self.on_log = tee_log
 
         temp_mount = None
+        tmp_root: Optional[Path] = None
         try:
             self._preflight_or_fail()
             self._flag(self.on_log, "START", "TotalSegmentator (GPU→CPU)")
@@ -526,7 +583,7 @@ class TotalSegmentatorRunner:
                 nii_input = self._robust_dicom_to_nifti(true_input, tmp_root)
                 self._flag(self.on_log, "NIFTI", "Intermedio", str(nii_input))
 
-            # Hilos y flags comunes
+ 
             with self._step("THREADS", "Calculando hilos"):
                 n_resamp, n_saving = self._suggest_threads(self.dev_info)
                 flags_common = ["--nr_thr_resamp",str(n_resamp),"--nr_thr_saving",str(n_saving)]
@@ -589,6 +646,8 @@ class TotalSegmentatorRunner:
                 self._flag(self.on_log, "TS", "HIP_IMPLANT", "Deshabilitado")
 
             # 5) Extras
+            # NOTA: con el reordenado, si hay cranio y teeth, cranio va primero y luego teeth.
+            will_run_teeth = ("teeth" in self.extra_tasks)
             for tname in self.extra_tasks:
                 extra_flags = list(flags_common)
                 self._flag(self.on_log, "TS", "Resumen EXTRA", f"task={tname} | stats=ON")
@@ -599,6 +658,10 @@ class TotalSegmentatorRunner:
                 t_ex = time.perf_counter() - t0_ex
                 self._flag(self.on_log, f"END|{tname}", "Duración", format_duration(t_ex))
                 self._merge_and_cleanup_stats(output_path)
+
+                # Limpieza específica para cranio
+                if tname == "craniofacial_structures":
+                    self._postprocess_cranio_outputs(output_path, will_run_teeth)
 
         finally:
             # Limpieza de temporales
@@ -671,10 +734,24 @@ if __name__ == "__main__":
     parser.add_argument("--task", dest="tasks", action="append", default=[],
                         help="Task extra (repetible), sin --fast. Se ignoran los tasks reservados.")
 
+    # Flags directos (sin 'modo'): dientes / cráneo
+    parser.add_argument("--teeth", action="store_true",
+                        help="Añade task 'teeth' (segmentación dental).")
+    parser.add_argument("--cranio", action="store_true",
+                        help="Añade task 'craniofacial_structures' (estructuras craneofaciales).")
+
     args = parser.parse_args()
 
     def server_log(line: str):
         print(line, flush=True)
+
+    # Construir lista final de tasks extra (merge sin duplicados ni reservados)
+    add_tasks: List[str] = []
+    if args.teeth:
+        add_tasks += TEETH_TASKS
+    if args.cranio:
+        add_tasks += CRANIO_TASKS
+    extra_tasks_final = merge_tasks(args.tasks, add_tasks)
 
     runner = TotalSegmentatorRunner(
         robust_import=not args.no_robust,
@@ -682,7 +759,7 @@ if __name__ == "__main__":
         enable_appendicular=args.appendicular,
         enable_muscles=args.muscles,
         enable_hip_implant=args.hip_implant,
-        extra_tasks=args.tasks,
+        extra_tasks=extra_tasks_final,
         on_log=server_log
     )
 

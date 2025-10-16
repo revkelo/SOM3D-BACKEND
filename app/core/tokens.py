@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import jwt
 
-from .config import JWT_SECRET, JWT_ALG
+from ..core.config import JWT_SECRET, JWT_ALG
 
 
 def _now():
@@ -81,3 +81,4 @@ def parse_reset_code_token(token: str) -> dict | None:
         return payload.get("d") or {}
     except Exception:
         return None
+

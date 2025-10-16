@@ -5,9 +5,9 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 
-from .config import JWT_SECRET, JWT_ALG, JWT_EXPIRE_MINUTES
-from .db import get_db
-from .models import Usuario
+from ..core.config import JWT_SECRET, JWT_ALG, JWT_EXPIRE_MINUTES
+from ..db import get_db
+from ..models import Usuario
 
 security = HTTPBearer()
 
@@ -32,7 +32,7 @@ def decode_token(token: str) -> dict:
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expirado")
     except jwt.InvalidTokenError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token invalido")
 
 def get_current_user(
     creds: HTTPAuthorizationCredentials = Depends(security),
@@ -44,8 +44,8 @@ def get_current_user(
     uid = payload.get("sub")
     if not uid:
         raise HTTPException(status_code=401, detail="Token sin 'sub'")
-    # Permitimos obtener el usuario aunque esté inactivo (para completar pago)
     user = db.query(Usuario).filter(Usuario.id_usuario == int(uid)).first()
     if not user:
         raise HTTPException(status_code=401, detail="Usuario no encontrado")
     return user
+

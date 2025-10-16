@@ -40,3 +40,4 @@ FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "")
 # Expiraciones de tokens
 VERIFY_EMAIL_EXPIRE_MIN = int(os.getenv("VERIFY_EMAIL_EXPIRE_MIN", "120"))
 RESET_PASS_EXPIRE_MIN = int(os.getenv("RESET_PASS_EXPIRE_MIN", "60"))
+

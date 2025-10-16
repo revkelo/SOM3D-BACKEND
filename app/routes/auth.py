@@ -15,9 +15,9 @@ from ..schemas import (
     ConfirmCodeIn,
     ResetPasswordCodeIn,
 )
-from ..mailer import send_email
-from ..config import SMTP_HOST, BASE_URL, FRONTEND_BASE_URL, VERIFY_EMAIL_EXPIRE_MIN, RESET_PASS_EXPIRE_MIN
-from ..tokens import (
+from ..services.mailer import send_email
+from ..core.config import SMTP_HOST, BASE_URL, FRONTEND_BASE_URL, VERIFY_EMAIL_EXPIRE_MIN, RESET_PASS_EXPIRE_MIN
+from ..core.tokens import (
     make_pre_register_token,
     parse_pre_register_token,
     make_reset_token,
@@ -27,7 +27,7 @@ from ..tokens import (
     parse_reset_code_token,
     _fp_password,
 )
-from ..auth import hash_password, verify_password, create_access_token, get_current_user
+from ..core.security import hash_password, verify_password, create_access_token, get_current_user
 from fastapi.responses import HTMLResponse
 
 router = APIRouter()
@@ -186,7 +186,7 @@ def reset_password_code(payload: ResetPasswordCodeIn, db: Session = Depends(get_
         raise HTTPException(status_code=400, detail="Token invalido o expirado")
     # fp guardado en token al generar
     saved_fp = data.get("fp")
-    from ..tokens import token_fp_matches as _tfm
+    from ..core.tokens import token_fp_matches as _tfm
     if not _tfm({"fp": saved_fp}, user.contrasena):
         raise HTTPException(status_code=400, detail="Token invalido o expirado")
     user.contrasena = hash_password(payload.new_password)

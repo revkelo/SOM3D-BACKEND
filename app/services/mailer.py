@@ -5,7 +5,7 @@ from email.mime.text import MIMEText
 from email.header import Header
 from email.policy import SMTP as SMTP_POLICY 
 
-from .config import (
+from ..core.config import (
     SMTP_HOST,
     SMTP_PORT,
     SMTP_USER,
@@ -16,15 +16,9 @@ from .config import (
 )
 
 def _build_message(frm: str, to: str, subject: str, html: str, text: Optional[str]) -> MIMEMultipart:
-    """
-    Construye un mensaje MIME con headers y cuerpos en UTF-8 seguros.
-    - Subject se codifica con RFC 2047 (ASCII-safe).
-    - Cuerpos 'plain' y 'html' en UTF-8.
-    - From/To como direcciones puras (sin nombres con acentos).
-    """
     msg = MIMEMultipart("alternative")
-    msg["From"] = frm               
-    msg["To"] = to                  
+    msg["From"] = frm              
+    msg["To"] = to                 
     msg["Subject"] = str(Header(subject or "(sin asunto)", "utf-8"))  
 
     if text is None:
@@ -36,18 +30,12 @@ def _build_message(frm: str, to: str, subject: str, html: str, text: Optional[st
 
 
 def send_email(to: str, subject: str, html: str, text: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Envía un correo usando smtplib con codificación UTF-8 segura.
-    Evita conversiones a ASCII usando as_bytes(policy=SMTP).
-    Activa SMTPUTF8 si el servidor lo soporta (opcional).
-    """
     if not SMTP_HOST:
         return {"ok": False, "error": "SMTP_HOST no configurado"}
 
     msg = _build_message(SMTP_FROM, to, subject, html, text)
 
     try:
-
         if SMTP_USE_SSL:
             server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT)
         else:
@@ -61,8 +49,6 @@ def send_email(to: str, subject: str, html: str, text: Optional[str] = None) -> 
         if SMTP_USER:
             server.login(SMTP_USER, SMTP_PASS)
 
-
-        
         mail_options = []
         if "smtputf8" in getattr(server, "esmtp_features", {}):
             mail_options.append("SMTPUTF8")
@@ -71,8 +57,6 @@ def send_email(to: str, subject: str, html: str, text: Optional[str] = None) -> 
         server.sendmail(SMTP_FROM, [to], raw, mail_options=mail_options)
         server.quit()
         return {"ok": True}
-
-
     except Exception as e:
-  
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+

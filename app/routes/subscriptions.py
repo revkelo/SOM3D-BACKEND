@@ -95,7 +95,7 @@ def start_subscription(payload: StartSubscriptionIn, db: Session = Depends(get_d
         db.commit()
         db.refresh(sus)
 
-    invoice = f"SOM3D-{sus.id_suscripcion}"
+    invoice = f"3DVinciStudio-{sus.id_suscripcion}"
     amount = f"{float(plan.precio):.2f}"
     name = f"Plan {plan.nombre}"
     description = f"Suscripción {plan.periodo} ({plan.duracion_meses} meses)"

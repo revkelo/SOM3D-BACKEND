@@ -1,7 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, EmailStr
+from pydantic import EmailStr
 from sqlalchemy.orm import Session
-from datetime import datetime
 
 from ..db import get_db
 from ..models import Usuario
@@ -16,7 +15,7 @@ from ..schemas import (
     ResetPasswordCodeIn,
 )
 from ..services.mailer import send_email
-from ..core.config import SMTP_HOST, BASE_URL, FRONTEND_BASE_URL, VERIFY_EMAIL_EXPIRE_MIN, RESET_PASS_EXPIRE_MIN
+from ..core.config import BASE_URL, FRONTEND_BASE_URL, VERIFY_EMAIL_EXPIRE_MIN, RESET_PASS_EXPIRE_MIN
 from ..core.tokens import (
     make_pre_register_token,
     parse_pre_register_token,
@@ -30,30 +29,9 @@ from ..core.tokens import (
 from ..core.security import hash_password, verify_password, create_access_token, get_current_user
 from fastapi.responses import HTMLResponse
 
+
 router = APIRouter()
 
-@router.post("/register", response_model=UserOut, status_code=201)
-def register(payload: RegisterIn, db: Session = Depends(get_db)):
-    exists = db.query(Usuario).filter(Usuario.correo == payload.correo).first()
-    if exists:
-        raise HTTPException(status_code=409, detail="Correo ya registrado")
-
-    user = Usuario(
-        nombre=payload.nombre,
-        apellido=payload.apellido,
-        correo=payload.correo,
-        contrasena=hash_password(payload.password),
-        telefono=payload.telefono,
-        direccion=payload.direccion,
-        ciudad=payload.ciudad,
-        rol=payload.rol,
-        # Se activará tras pago aprobado en /epayco/confirmation
-        activo=False,
-    )
-    db.add(user)
-    db.commit()
-    db.refresh(user)
-    return user
 
 @router.post("/login", response_model=TokenOut)
 def login(payload: LoginIn, db: Session = Depends(get_db)):
@@ -64,6 +42,7 @@ def login(payload: LoginIn, db: Session = Depends(get_db)):
 
     token = create_access_token({"sub": str(user.id_usuario), "rol": user.rol, "email": user.correo})
     return {"access_token": token, "token_type": "bearer"}
+
 
 @router.get("/me", response_model=UserOut)
 def whoami(current=Depends(get_current_user)):
@@ -77,28 +56,6 @@ def email_exists(correo: EmailStr, db: Session = Depends(get_db)):
     """
     exists = db.query(Usuario).filter(Usuario.correo == str(correo)).first() is not None
     return {"exists": exists}
-
-
-class EmailTestIn(BaseModel):
-    to: EmailStr
-    subject: str | None = None
-    html: str | None = None
-
-
-@router.post("/email-test")
-def email_test(payload: EmailTestIn):
-    if not SMTP_HOST:
-        raise HTTPException(status_code=500, detail="SMTP no configurado (faltan variables .env)")
-    subject = payload.subject or "Prueba de correo SOM3D"
-    html = payload.html or """
-        <h2>¡Hola!</h2>
-        <p>Este es un correo de <b>prueba</b> enviado desde el backend (smtplib).</p>
-        <p>Si lo recibiste, tu configuración SMTP funciona.</p>
-    """.strip()
-    res = send_email(str(payload.to), subject, html)
-    if not res.get("ok"):
-        raise HTTPException(status_code=502, detail=f"Fallo enviando correo: {res}")
-    return {"ok": True}
 
 
 # -----------------------
@@ -127,7 +84,6 @@ def forgot_password(payload: ForgotPasswordIn, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
-
 @router.post("/reset-password")
 def reset_password(payload: ResetPasswordIn, db: Session = Depends(get_db)):
     data = parse_reset_token(payload.token)
@@ -141,7 +97,7 @@ def reset_password(payload: ResetPasswordIn, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
-# --- Flujo alternativo: código de 6 dígitos para restablecer ---
+# --- Alternativa: código de 6 dígitos para restablecer ---
 @router.post("/forgot-password/code")
 def forgot_password_code(payload: ForgotPasswordIn, db: Session = Depends(get_db)):
     user = db.query(Usuario).filter(Usuario.correo == payload.correo).first()
@@ -192,6 +148,8 @@ def reset_password_code(payload: ResetPasswordCodeIn, db: Session = Depends(get_
     user.contrasena = hash_password(payload.new_password)
     db.commit()
     return {"ok": True}
+
+
 @router.post("/pre-register")
 def pre_register(payload: RegisterIn, db: Session = Depends(get_db)):
     exists = db.query(Usuario).filter(Usuario.correo == payload.correo).first()
@@ -227,30 +185,6 @@ def pre_register(payload: RegisterIn, db: Session = Depends(get_db)):
         raise HTTPException(status_code=502, detail=f"Fallo enviando correo: {res}")
     # Return token to be used with code on frontend
     return {"ok": True, "token": token, "expires_in": VERIFY_EMAIL_EXPIRE_MIN}
-
-
-@router.get("/register/confirm")
-def confirm_register(token: str = Query(...), db: Session = Depends(get_db)):
-    data = parse_pre_register_token(token)
-    if not data:
-        raise HTTPException(status_code=400, detail="Token invalido o expirado")
-    if db.query(Usuario).filter(Usuario.correo == data.get("correo")).first():
-        raise HTTPException(status_code=409, detail="Correo ya registrado")
-    user = Usuario(
-        nombre=data.get("nombre"),
-        apellido=data.get("apellido"),
-        correo=data.get("correo"),
-        contrasena=data.get("hashed"),
-        telefono=data.get("telefono"),
-        direccion=data.get("direccion"),
-        ciudad=data.get("ciudad"),
-        rol=data.get("rol") or "MEDICO",
-        activo=False,
-    )
-    db.add(user)
-    db.commit()
-    db.refresh(user)
-    return {"ok": True, "id_usuario": user.id_usuario}
 
 
 @router.post("/register/confirm-code")
@@ -324,5 +258,4 @@ def reset_password_form(token: str = Query(...)):
     </body></html>"""
     html = template.replace('__TOKEN__', token)
     return HTMLResponse(html)
-
 

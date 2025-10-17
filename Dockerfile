@@ -15,21 +15,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Instala deps Python comunes
-COPY requirements-common.txt ./
+# Instala deps Python
+COPY requirements.txt ./
 RUN pip install --no-cache-dir -U pip setuptools wheel \
  && pip install --no-cache-dir cupy-cuda12x==13.0.0 \
- && pip install --no-cache-dir -r requirements-common.txt
+ && pip install --no-cache-dir -r requirements.txt
 # Nota: torch/torchvision/torchaudio ya vienen en la imagen base GPU
 
 # Copia tu aplicación
 COPY . .
 
 ENV PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app \
     PORT=8000
 
 EXPOSE 8000
-CMD ["uvicorn","som3d_api:app","--host","0.0.0.0","--port","8000","--workers","1"]
+CMD ["uvicorn","app.main:app","--host","0.0.0.0","--port","8000","--workers","1"]
 
 ############################
 # Stage CPU (sin CUDA)
@@ -53,14 +54,15 @@ RUN pip install --no-cache-dir -U pip setuptools wheel \
       torch==${TORCH_VER} torchvision==${TV_VER} torchaudio==${TA_VER}
 
 # Resto de dependencias
-COPY requirements-common.txt ./
-RUN pip install --no-cache-dir -r requirements-common.txt
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copia tu aplicación
 COPY . .
 
 ENV PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app \
     PORT=8000
 
 EXPOSE 8000
-CMD ["uvicorn","som3d_api:app","--host","0.0.0.0","--port","8000","--workers","1"]
+CMD ["uvicorn","app.main:app","--host","0.0.0.0","--port","8000","--workers","1"]

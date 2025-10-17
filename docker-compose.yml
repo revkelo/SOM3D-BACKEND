@@ -23,6 +23,8 @@ services:
       context: .
       target: gpu   # cambia a "cpu" si quieres forzar CPU
     image: som3d:gpu
+    shm_size: "2g"
+    ipc: "host"
     ports:
       - "8000:8000"
     env_file:
@@ -39,8 +41,15 @@ services:
       - S3_INSECURE=${S3_INSECURE:-true}
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-${MINIO_ROOT_USER:-minioadmin}}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-${MINIO_ROOT_PASSWORD:-minioadmin}}
+      - OMP_NUM_THREADS=1
+      - MKL_NUM_THREADS=1
+      - NUMEXPR_NUM_THREADS=1
+      - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:64,garbage_collection_threshold:0.7
+      - TMPDIR=/_ts_tmp
     volumes:
       - ./data:/data
+      - "C:\\som3d\\tmp:/_ts_tmp"
+      - "C:\\som3d\\cache:/root/.cache"
     depends_on:
       minio:
         condition: service_healthy

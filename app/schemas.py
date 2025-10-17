@@ -1,5 +1,6 @@
 from pydantic import BaseModel, EmailStr, Field
 from typing import Optional, Literal
+from datetime import date, datetime
 
 class RegisterIn(BaseModel):
     nombre: str = Field(min_length=1, max_length=100)
@@ -152,3 +153,139 @@ class ResetPasswordCodeIn(BaseModel):
     token: str = Field(min_length=10, max_length=4096)
     code: str = Field(min_length=6, max_length=6)
     new_password: str = Field(min_length=6, max_length=128)
+
+
+# --------------------
+# Paciente
+# --------------------
+class PacienteIn(BaseModel):
+    doc_tipo: Optional[str] = Field(default=None, max_length=20)
+    doc_numero: Optional[str] = Field(default=None, max_length=40)
+    nombres: str = Field(min_length=1, max_length=100)
+    apellidos: str = Field(min_length=1, max_length=100)
+    fecha_nacimiento: Optional[date] = None
+    sexo: Optional[str] = Field(default=None, max_length=20)
+    telefono: Optional[str] = Field(default=None, max_length=30)
+    correo: Optional[EmailStr] = None
+    direccion: Optional[str] = Field(default=None, max_length=200)
+    ciudad: Optional[str] = Field(default=None, max_length=80)
+
+class PacienteUpdateIn(BaseModel):
+    doc_tipo: Optional[str] = Field(default=None, max_length=20)
+    doc_numero: Optional[str] = Field(default=None, max_length=40)
+    nombres: Optional[str] = Field(default=None, max_length=100)
+    apellidos: Optional[str] = Field(default=None, max_length=100)
+    fecha_nacimiento: Optional[date] = None
+    sexo: Optional[str] = Field(default=None, max_length=20)
+    telefono: Optional[str] = Field(default=None, max_length=30)
+    correo: Optional[EmailStr] = None
+    direccion: Optional[str] = Field(default=None, max_length=200)
+    ciudad: Optional[str] = Field(default=None, max_length=80)
+    estado: Optional[Literal["ACTIVO","INACTIVO"]] = None
+
+class PacienteOut(BaseModel):
+    id_paciente: int
+    id_medico: int
+    doc_tipo: Optional[str]
+    doc_numero: Optional[str]
+    nombres: str
+    apellidos: str
+    fecha_nacimiento: Optional[date]
+    sexo: Optional[str]
+    telefono: Optional[str]
+    correo: Optional[EmailStr]
+    direccion: Optional[str]
+    ciudad: Optional[str]
+    estado: Literal["ACTIVO","INACTIVO"]
+
+    class Config:
+        from_attributes = True
+
+
+# --------------------
+# Estudio
+# --------------------
+class EstudioIn(BaseModel):
+    id_paciente: int
+    modalidad: Optional[str] = Field(default=None, max_length=20)
+    fecha_estudio: Optional[datetime] = None
+    descripcion: Optional[str] = Field(default=None, max_length=200)
+
+class EstudioOut(BaseModel):
+    id_estudio: int
+    id_paciente: int
+    id_medico: int
+    modalidad: Optional[str]
+    fecha_estudio: datetime
+    descripcion: Optional[str]
+
+    class Config:
+        from_attributes = True
+
+
+# --------------------
+# Jobs (DB) + finalize
+# --------------------
+class JobConvOut(BaseModel):
+    job_id: str
+    id_usuario: int
+    status: Literal["QUEUED","RUNNING","DONE","ERROR","CANCELED"]
+    enable_ortopedia: bool
+    enable_appendicular: bool
+    enable_muscles: bool
+    enable_skull: bool
+    enable_teeth: bool
+    enable_hip_implant: bool
+    queue_name: Optional[str]
+    started_at: Optional[str]
+    finished_at: Optional[str]
+    updated_at: Optional[str]
+
+    class Config:
+        from_attributes = True
+
+class FinalizeJobIn(BaseModel):
+    id_paciente: int
+    stl_size: Optional[int] = None
+    num_stl_archivos: Optional[int] = None
+
+class JobSTLOut(BaseModel):
+    id_jobstl: int
+    job_id: str
+    id_paciente: int
+    stl_size: Optional[int]
+    num_stl_archivos: Optional[int]
+    created_at: Optional[str]
+    updated_at: Optional[str]
+
+    class Config:
+        from_attributes = True
+
+
+# --------------------
+# VisorEstado
+# --------------------
+class VisorEstadoIn(BaseModel):
+    id_paciente: int
+    id_jobstl: Optional[int] = None
+    titulo: str = Field(min_length=1, max_length=200)
+    descripcion: Optional[str] = Field(default=None, max_length=400)
+    ui_json: str
+    modelos_json: str
+    notas_json: str
+    i18n_json: str
+
+class VisorEstadoOut(BaseModel):
+    id_visor_estado: int
+    id_medico: int
+    id_paciente: int
+    id_jobstl: Optional[int]
+    titulo: str
+    descripcion: Optional[str]
+    ui_json: str
+    modelos_json: str
+    notas_json: str
+    i18n_json: str
+
+    class Config:
+        from_attributes = True

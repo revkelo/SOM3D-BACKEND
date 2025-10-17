@@ -112,9 +112,8 @@ async def epayco_validate(ref_payco: str):
         "raw": valid_json,
     }
 
-@router.api_route("/confirmation", methods=["GET", "POST"])
-async def epayco_confirmation(request: Request, db: Session = Depends(get_db)):
-    payload = dict(await request.form()) if request.method == "POST" else dict(request.query_params)
+async def _epayco_confirmation_impl(method: str, request: Request, db: Session) -> JSONResponse:
+    payload = dict(await request.form()) if method == "POST" else dict(request.query_params)
 
     x_ref_payco      = payload.get("x_ref_payco", "")
     x_transaction_id = payload.get("x_transaction_id", "")
@@ -181,4 +180,14 @@ async def epayco_confirmation(request: Request, db: Session = Depends(get_db)):
             PROCESADOS.add(x_ref_payco)
 
     return JSONResponse({"ok": True, "firma_valida": firma_ok, "estado": estado, "ref": x_ref_payco, "suscripcion": x_extra1, "invoice": x_id_invoice})
+
+
+@router.get("/confirmation", name="epayco_confirmation_get", operation_id="epayco_confirmation_get")
+async def epayco_confirmation_get(request: Request, db: Session = Depends(get_db)):
+    return await _epayco_confirmation_impl("GET", request, db)
+
+
+@router.post("/confirmation", name="epayco_confirmation_post", operation_id="epayco_confirmation_post")
+async def epayco_confirmation_post(request: Request, db: Session = Depends(get_db)):
+    return await _epayco_confirmation_impl("POST", request, db)
 

@@ -13,12 +13,18 @@ from typing import Any, Dict, List, Optional
 
 import json
 
-from fastapi import APIRouter, File, Form, UploadFile, HTTPException
+from fastapi import APIRouter, File, Form, UploadFile, HTTPException, Depends
 from fastapi.responses import JSONResponse
 
 from app.services.s3_manager import S3Manager, S3Config
 from app.services.som3d.totalsegmentator import TotalSegmentatorRunner
 from app.services.som3d.generator import NiftiToSTLConverter
+from sqlalchemy.orm import Session
+from ..db import get_db
+from ..core.security import get_current_user, get_current_user_optional
+from ..models import JobConv, JobSTL, Paciente, Medico
+from ..schemas import FinalizeJobIn, JobSTLOut
+from ..core.config import mysql_url
 
 
 router = APIRouter(prefix="/som3d", tags=["som3d"])
@@ -153,9 +159,10 @@ def _append_log(job_id: str, line: str, manifest: Optional[JobManifest] = None):
         _save_manifest(manifest)
 
 
-def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any]):
+def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], db_url: Optional[str] = None):
     from pathlib import Path
     import tempfile
+    from sqlalchemy import create_engine, text as _sql_text
 
     s3 = S3Manager(S3Config(**s3_cfg))
 
@@ -200,6 +207,23 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any]):
         except Exception:
             pass
 
+    def _update_jobconv(status: str, set_finished: bool = False):
+        if not db_url:
+            return
+        try:
+            eng = create_engine(db_url, pool_pre_ping=True, future=True)
+            with eng.begin() as conn:
+                if set_finished:
+                    conn.execute(_sql_text(
+                        "UPDATE JobConv SET status=:s, finished_at=NOW(), updated_at=NOW() WHERE job_id=:jid"
+                    ), {"s": status, "jid": job_id})
+                else:
+                    conn.execute(_sql_text(
+                        "UPDATE JobConv SET status=:s, updated_at=NOW() WHERE job_id=:jid"
+                    ), {"s": status, "jid": job_id})
+        except Exception:
+            pass
+
     def save_worker_error(phase_name: str, exc: BaseException):
         wlog(f"ERROR en fase '{phase_name}': {type(exc).__name__}: {exc}")
         write_manifest_patch({
@@ -208,6 +232,7 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any]):
             "error": f"{type(exc).__name__}: {exc}",
             "percent": 99.0
         })
+        _update_jobconv("ERROR", set_finished=True)
 
     try:
         write_manifest_patch({"status": "running", "phase": "totalsegmentator"})
@@ -270,6 +295,7 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any]):
                 "s3_keys_results": keys,
             })
             wlog("Job terminado.")
+            _update_jobconv("DONE", set_finished=True)
     except Exception as e:
         save_worker_error("fatal", e)
 
@@ -284,6 +310,9 @@ async def create_job(
     teeth: bool = Form(False),
     cranio: bool = Form(False),
     extra_tasks: Optional[str] = Form(None),
+    id_paciente: Optional[int] = Form(None),
+    db: Session = Depends(get_db),
+    user = Depends(get_current_user),
 ):
     # Validación rápida de variables S3 para errores claros
     _require_s3_env()
@@ -353,9 +382,37 @@ async def create_job(
         access_key=s3.cfg.access_key,
         secret_key=s3.cfg.secret_key,
     )
-    proc = Process(target=_worker_entry, args=(job_id, s3_cfg, manifest.params), daemon=True)
+    db_url = None
+    try:
+        db_url = mysql_url()
+    except Exception:
+        db_url = None
+    proc = Process(target=_worker_entry, args=(job_id, s3_cfg, manifest.params, db_url), daemon=True)
     proc.start()
     _append_log(job_id, f"PID worker: {proc.pid}")
+
+    # Persistencia opcional en BD (JobConv) si tenemos usuario autenticado
+    try:
+        jc = JobConv(
+            job_id=job_id,
+            id_usuario=user.id_usuario,
+            status="RUNNING",
+            started_at=time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
+            enable_ortopedia=bool(enable_ortopedia),
+            enable_appendicular=bool(enable_appendicular),
+            enable_muscles=bool(enable_muscles),
+            enable_skull=bool(cranio),
+            enable_teeth=bool(teeth),
+            enable_hip_implant=bool(enable_hip_implant),
+            extra_tasks_json=(json.dumps(extra_list, ensure_ascii=False) if extra_list else None),
+        )
+        db.add(jc)
+        db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
 
     return JSONResponse(content=manifest.to_dict(), status_code=201)
 
@@ -464,6 +521,38 @@ async def get_result(job_id: str, expires: int = 3600):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Presign error: {e}")
     return {"job_id": job_id, "url": url, "expires_in": expires}
+
+
+@router.post("/jobs/{job_id}/finalize", response_model=JobSTLOut)
+async def finalize_job(job_id: str, payload: FinalizeJobIn, db: Session = Depends(get_db), user = Depends(get_current_user)):
+    # Optionally mark JobConv as DONE and create JobSTL linked to a Paciente
+    # Validate paciente ownership if medico
+    med = db.query(Medico).filter(Medico.id_usuario == user.id_usuario).first()
+    if med is not None:
+        p = db.query(Paciente).filter(Paciente.id_paciente == payload.id_paciente).first()
+        if not p or p.id_medico != med.id_medico:
+            raise HTTPException(status_code=403, detail="Paciente no pertenece al medico")
+
+    # Update JobConv status if exists
+    try:
+        jc = db.query(JobConv).filter(JobConv.job_id == job_id).first()
+        if jc:
+            jc.status = "DONE"
+            jc.finished_at = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+            db.add(jc)
+    except Exception:
+        pass
+
+    js = JobSTL(
+        job_id=job_id,
+        id_paciente=payload.id_paciente,
+        stl_size=payload.stl_size,
+        num_stl_archivos=payload.num_stl_archivos,
+    )
+    db.add(js)
+    db.commit()
+    db.refresh(js)
+    return js
 
 
 @router.delete("/jobs/{job_id}")

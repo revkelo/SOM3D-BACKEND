@@ -9,7 +9,7 @@ Resumen
 
 Estructura
 - `app/main.py`: aplicación FastAPI y rutas montadas.
-- `app/routes/*`: endpoints de `auth`, `plans`, `subscriptions`, `epayco`.
+- `app/routes/*`: endpoints de `auth`, `plans`, `subscriptions`, `epayco`, `patients`, `studies`, `visor`, `som3d`.
 - `app/models.py`: modelos SQLAlchemy.
 - `app/schemas.py`: modelos Pydantic (request/response).
 - `app/db.py`: engine y sesión.
@@ -69,10 +69,19 @@ Puntos de salud y rutas
 - `GET /epayco/response` (HTML)
 - `GET /epayco/validate?ref_payco=...`
 - `GET|POST /epayco/confirmation`
+- `GET /patients` | `POST /patients` | `GET/PATCH/DELETE /patients/{id}` (Bearer MEDICO/Admin)
+- `GET /studies` | `POST /studies` | `GET /studies/{id}` (Bearer MEDICO/Admin)
+- `POST /visor/states` | `GET /visor/states` | `GET/DELETE /visor/states/{id}` (Bearer MEDICO/Admin lectura)
+- `POST /som3d/jobs` (requiere Bearer; sube ZIP DICOM; opcional `id_paciente`)
+- `GET /som3d/jobs` | `GET /som3d/jobs/{id}` | `GET /som3d/jobs/{id}/progress` | `GET /som3d/jobs/{id}/stls` | `GET /som3d/jobs/{id}/result`
+- `POST /som3d/jobs/{id}/finalize` (requiere Bearer; registra JobSTL con `id_paciente` y métricas)
 
 Notas
 - Este repo incluía `requirements.txt` con dependencias 3D no usadas por este API. Para el backend usa `requirements-backend.txt`.
 - Si ya tienes una base MySQL externa, ajusta `DB_HOST`, `DB_PORT`, etc. y puedes omitir el servicio `db` en compose.
+
+Datos y SQL
+- Coloca el volcado completo en `data/casaos.sql` o impórtalo directo en tu MySQL. Consulta `data/README.md`.
 
 
 para el ec2 el env

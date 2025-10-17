@@ -7,6 +7,9 @@ from .routes.plans import router as plans_router
 from .routes.subscriptions import router as subs_router
 from .api.epayco import router as epayco_router
 from .routes.som3d import router as som3d_router
+from .routes.patients import router as patients_router
+from .routes.studies import router as studies_router
+from .routes.visor import router as visor_router
 
 # Cargar variables de entorno desde .env si existe
 try:
@@ -32,6 +35,9 @@ app.include_router(plans_router, tags=["plans"])
 app.include_router(subs_router, tags=["subscriptions"])
 app.include_router(epayco_router)  # /epayco/...
 app.include_router(som3d_router)   # /som3d/...
+app.include_router(patients_router)  # /patients
+app.include_router(studies_router)   # /studies
+app.include_router(visor_router)     # /visor
 
 @app.get("/health")
 def health():

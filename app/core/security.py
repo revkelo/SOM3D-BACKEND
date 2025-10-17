@@ -10,6 +10,7 @@ from ..db import get_db
 from ..models import Usuario
 
 security = HTTPBearer()
+security_optional = HTTPBearer(auto_error=False)
 
 def hash_password(plain: str) -> str:
     return bcrypt.hashpw(plain.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
@@ -49,3 +50,19 @@ def get_current_user(
         raise HTTPException(status_code=401, detail="Usuario no encontrado")
     return user
 
+
+def get_current_user_optional(
+    creds: HTTPAuthorizationCredentials | None = Depends(security_optional),
+    db: Session = Depends(get_db),
+):
+    if not creds or creds.scheme.lower() != "bearer":
+        return None
+    try:
+        payload = decode_token(creds.credentials)
+        uid = payload.get("sub")
+        if not uid:
+            return None
+        user = db.query(Usuario).filter(Usuario.id_usuario == int(uid)).first()
+        return user
+    except HTTPException:
+        return None

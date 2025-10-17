@@ -1,8 +1,9 @@
 from sqlalchemy import (
-    Column, Integer, String, Enum, Boolean, TIMESTAMP, text, DateTime, DECIMAL, ForeignKey
+    Column, Integer, String, Enum, Boolean, TIMESTAMP, text, DateTime, Date, DECIMAL, ForeignKey, BigInteger, Text
 )
 from sqlalchemy.orm import relationship, Mapped, mapped_column
 from .db import Base
+from datetime import datetime
 
 class Hospital(Base):
     __tablename__ = "Hospital"
@@ -76,5 +77,81 @@ class Pago(Base):
     referencia_epayco: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     monto: Mapped[DECIMAL] = mapped_column(DECIMAL(12,2), nullable=False)
     fecha_pago: Mapped[str] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
+    creado_en: Mapped[str] = mapped_column(TIMESTAMP, server_default=text("CURRENT_TIMESTAMP"))
+    actualizado_en: Mapped[str] = mapped_column(TIMESTAMP, server_default=text("CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"))
+
+
+class Paciente(Base):
+    __tablename__ = "Paciente"
+    id_paciente: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id_medico: Mapped[int] = mapped_column(ForeignKey("Medico.id_medico"), nullable=False)
+    doc_tipo: Mapped[str | None] = mapped_column(String(20))
+    doc_numero: Mapped[str | None] = mapped_column(String(40))
+    nombres: Mapped[str] = mapped_column(String(100), nullable=False)
+    apellidos: Mapped[str] = mapped_column(String(100), nullable=False)
+    fecha_nacimiento: Mapped[str | None] = mapped_column(Date)
+    sexo: Mapped[str | None] = mapped_column(String(20))
+    telefono: Mapped[str | None] = mapped_column(String(30))
+    correo: Mapped[str | None] = mapped_column(String(120))
+    direccion: Mapped[str | None] = mapped_column(String(200))
+    ciudad: Mapped[str | None] = mapped_column(String(80))
+    estado: Mapped[str] = mapped_column(Enum("ACTIVO","INACTIVO", name="estado_paciente"), server_default="ACTIVO")
+    creado_en: Mapped[str] = mapped_column(TIMESTAMP, server_default=text("CURRENT_TIMESTAMP"))
+    actualizado_en: Mapped[str] = mapped_column(TIMESTAMP, server_default=text("CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"))
+
+
+class Estudio(Base):
+    __tablename__ = "Estudio"
+    id_estudio: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id_paciente: Mapped[int] = mapped_column(ForeignKey("Paciente.id_paciente"), nullable=False)
+    id_medico: Mapped[int] = mapped_column(ForeignKey("Medico.id_medico"), nullable=False)
+    modalidad: Mapped[str | None] = mapped_column(String(20))
+    fecha_estudio: Mapped[datetime] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    descripcion: Mapped[str | None] = mapped_column(String(200))
+    creado_en: Mapped[str] = mapped_column(TIMESTAMP, server_default=text("CURRENT_TIMESTAMP"))
+    actualizado_en: Mapped[str] = mapped_column(TIMESTAMP, server_default=text("CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"))
+
+
+class JobConv(Base):
+    __tablename__ = "JobConv"
+    job_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    id_usuario: Mapped[int] = mapped_column(ForeignKey("Usuario.id_usuario"), nullable=False)
+    status: Mapped[str] = mapped_column(Enum("QUEUED","RUNNING","DONE","ERROR","CANCELED", name="status_jobconv"), server_default="QUEUED", nullable=False)
+    enable_ortopedia: Mapped[bool] = mapped_column(Boolean, server_default=text("1"), nullable=False)
+    enable_appendicular: Mapped[bool] = mapped_column(Boolean, server_default=text("0"), nullable=False)
+    enable_muscles: Mapped[bool] = mapped_column(Boolean, server_default=text("0"), nullable=False)
+    enable_skull: Mapped[bool] = mapped_column(Boolean, server_default=text("0"), nullable=False)
+    enable_teeth: Mapped[bool] = mapped_column(Boolean, server_default=text("0"), nullable=False)
+    enable_hip_implant: Mapped[bool] = mapped_column(Boolean, server_default=text("0"), nullable=False)
+    extra_tasks_json: Mapped[str | None] = mapped_column(Text)
+    queue_name: Mapped[str | None] = mapped_column(String(80))
+    started_at: Mapped[str | None] = mapped_column(DateTime)
+    finished_at: Mapped[str | None] = mapped_column(DateTime)
+    updated_at: Mapped[str] = mapped_column(TIMESTAMP, server_default=text("CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"))
+
+
+class JobSTL(Base):
+    __tablename__ = "JobSTL"
+    id_jobstl: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id: Mapped[str] = mapped_column(ForeignKey("JobConv.job_id"), nullable=False)
+    id_paciente: Mapped[int] = mapped_column(ForeignKey("Paciente.id_paciente"), nullable=False)
+    stl_size: Mapped[int | None] = mapped_column(BigInteger)
+    num_stl_archivos: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[str] = mapped_column(TIMESTAMP, server_default=text("CURRENT_TIMESTAMP"))
+    updated_at: Mapped[str] = mapped_column(TIMESTAMP, server_default=text("CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"))
+
+
+class VisorEstado(Base):
+    __tablename__ = "VisorEstado"
+    id_visor_estado: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id_medico: Mapped[int] = mapped_column(ForeignKey("Medico.id_medico"), nullable=False)
+    id_paciente: Mapped[int] = mapped_column(ForeignKey("Paciente.id_paciente"), nullable=False)
+    id_jobstl: Mapped[int | None] = mapped_column(ForeignKey("JobSTL.id_jobstl"))
+    titulo: Mapped[str] = mapped_column(String(200), nullable=False)
+    descripcion: Mapped[str | None] = mapped_column(String(400))
+    ui_json: Mapped[str] = mapped_column(Text, nullable=False)
+    modelos_json: Mapped[str] = mapped_column(Text, nullable=False)
+    notas_json: Mapped[str] = mapped_column(Text, nullable=False)
+    i18n_json: Mapped[str] = mapped_column(Text, nullable=False)
     creado_en: Mapped[str] = mapped_column(TIMESTAMP, server_default=text("CURRENT_TIMESTAMP"))
     actualizado_en: Mapped[str] = mapped_column(TIMESTAMP, server_default=text("CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"))

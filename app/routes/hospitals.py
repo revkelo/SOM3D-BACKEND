@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..auth import get_current_user
+from ..core.security import get_current_user
 from ..models import Hospital, Medico, Suscripcion, Pago
 from ..schemas import HospitalIn, HospitalOut, HospitalUpdateIn
 from fastapi import Body

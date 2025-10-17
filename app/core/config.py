@@ -24,3 +24,20 @@ EPAYCO_TEST = os.getenv("EPAYCO_TEST", "true").lower() == "true"
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
 P_CUST_ID_CLIENTE = os.getenv("P_CUST_ID_CLIENTE", "")
 P_KEY = os.getenv("P_KEY", "")
+
+# SMTP / Email
+SMTP_HOST = os.getenv("SMTP_HOST", "")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "")
+SMTP_PASS = os.getenv("SMTP_PASS", "")
+SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USER or "no-reply@example.com")
+SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "true").lower() == "true"
+SMTP_USE_SSL = os.getenv("SMTP_USE_SSL", "false").lower() == "true"
+
+# Frontend base (para links en emails)
+FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "")
+
+# Expiraciones de tokens
+VERIFY_EMAIL_EXPIRE_MIN = int(os.getenv("VERIFY_EMAIL_EXPIRE_MIN", "120"))
+RESET_PASS_EXPIRE_MIN = int(os.getenv("RESET_PASS_EXPIRE_MIN", "60"))
+

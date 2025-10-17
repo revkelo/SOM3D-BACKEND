@@ -1,4 +1,4 @@
-﻿import os, hashlib, json
+import os, hashlib, json
 from datetime import datetime
 from typing import Dict, Any
 
@@ -7,9 +7,9 @@ from fastapi import APIRouter, Request, Depends
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy.orm import Session
 
-from .db import get_db
-from .models import Suscripcion, Pago, Plan, Medico
-from .config import EPAYCO_PUBLIC_KEY, EPAYCO_TEST, BASE_URL, P_CUST_ID_CLIENTE, P_KEY
+from ..db import get_db
+from ..models import Suscripcion, Pago, Plan, Medico
+from ..core.config import EPAYCO_PUBLIC_KEY, EPAYCO_TEST, BASE_URL, P_CUST_ID_CLIENTE, P_KEY
 
 router = APIRouter(prefix="/epayco", tags=["epayco"])
 
@@ -37,7 +37,7 @@ def _page(title: str, body_html: str) -> HTMLResponse:
 async def epayco_response(request: Request):
     params = dict(request.query_params)
     ref_payco = params.get("ref_payco")
-    detail = "<p class='warn'>No recibÃ­ <code>ref_payco</code> en la URL.</p>"
+    detail = "<p class='warn'>No recibí <code>ref_payco</code> en la URL.</p>"
     valid_json = {}
 
     if ref_payco:
@@ -50,7 +50,7 @@ async def epayco_response(request: Request):
             cod = str(d.get("x_cod_response", ""))
             estado = STATUS_MAP.get(cod, "DESCONOCIDO")
             detail = f"""
-            <p class="ok">ValidaciÃ³n OK â€” estado: <b>{estado}</b></p>
+            <p class="ok">Validación OK — estado: <b>{estado}</b></p>
             <table>
               <tr><td>ref_payco</td><td><code>{ref_payco}</code></td></tr>
               <tr><td>x_id_invoice</td><td>{d.get('x_id_invoice')}</td></tr>
@@ -62,7 +62,7 @@ async def epayco_response(request: Request):
             </table>
             """
         else:
-            detail = f"<p class='err'>La validaciÃ³n respondiÃ³ error para <code>{ref_payco}</code>.</p>"
+            detail = f"<p class='err'>La validación respondió error para <code>{ref_payco}</code>.</p>"
 
     body = f"""
     <div class="card">
@@ -70,9 +70,9 @@ async def epayco_response(request: Request):
       <p>QueryString recibido:</p>
       <pre>{json.dumps(params, indent=2, ensure_ascii=False)}</pre>
       <hr/>
-      <h4>ValidaciÃ³n por <code>ref_payco</code></h4>
+      <h4>Validación por <code>ref_payco</code></h4>
       {detail}
-      <h4>Raw de validaciÃ³n</h4>
+      <h4>Raw de validación</h4>
       <pre>{json.dumps(valid_json, indent=2, ensure_ascii=False)}</pre>
     </div>
     """
@@ -133,19 +133,15 @@ async def epayco_confirmation(request: Request, db: Session = Depends(get_db)):
     if x_ref_payco and x_ref_payco in PROCESADOS:
         return JSONResponse({"ok": True, "duplicado": True, "firma_valida": firma_ok, "estado": estado, "ref": x_ref_payco})
 
-    # Procesar solo si la firma es vÃ¡lida
     if firma_ok and estado == "APROBADO" and x_extra1:
-        # Buscar suscripciÃ³n
         sus = db.query(Suscripcion).filter(Suscripcion.id_suscripcion == int(x_extra1)).first()
         if sus:
-            # Registrar pago
             pago = Pago(
                 id_suscripcion=sus.id_suscripcion,
                 referencia_epayco=x_ref_payco,
                 monto=float(x_amount or 0)
             )
             db.add(pago)
-            # Verificar conflicto de suscripción ACTIVA antes de activar
             conflict_q = db.query(Suscripcion).filter(
                 Suscripcion.estado == "ACTIVA",
                 Suscripcion.id_suscripcion != sus.id_suscripcion,
@@ -156,7 +152,6 @@ async def epayco_confirmation(request: Request, db: Session = Depends(get_db)):
                 conflict_q = conflict_q.filter(Suscripcion.id_hospital == sus.id_hospital)
             conflict = conflict_q.first()
             if conflict:
-                # Guardar solo el pago y reportar conflicto sin activar
                 db.commit()
                 PROCESADOS.add(x_ref_payco)
                 return JSONResponse({
@@ -169,14 +164,12 @@ async def epayco_confirmation(request: Request, db: Session = Depends(get_db)):
                     "motivo": "Ya existe otra Suscripción ACTIVA para este titular",
                 })
 
-            # Activar y extender suscripciÃ³n segÃºn plan
             plan = db.query(Plan).filter(Plan.id_plan == sus.id_plan).first()
             now = datetime.utcnow()
             sus.estado = "ACTIVA"
             sus.fecha_inicio = now
             from dateutil.relativedelta import relativedelta
             sus.fecha_expiracion = now + relativedelta(months=+int(getattr(plan, "duracion_meses", 1)))
-            # Activar usuario tras pago aprobado
             try:
                 if sus.id_medico is not None:
                     med = db.query(Medico).filter(Medico.id_medico == sus.id_medico).first()
@@ -188,3 +181,4 @@ async def epayco_confirmation(request: Request, db: Session = Depends(get_db)):
             PROCESADOS.add(x_ref_payco)
 
     return JSONResponse({"ok": True, "firma_valida": firma_ok, "estado": estado, "ref": x_ref_payco, "suscripcion": x_extra1, "invoice": x_id_invoice})
+

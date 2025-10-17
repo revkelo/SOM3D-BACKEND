@@ -1,21 +1,68 @@
-FROM python:3.12-slim
+# syntax=docker/dockerfile:1.6
+ARG PYTHON_VERSION=3.10
+ARG TS_VERSION=2.11.0
 
-# Prevents Python from writing .pyc files and buffers logs to stdout
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+############################
+# Stage GPU (CUDA 12.1)
+############################
+FROM pytorch/pytorch:2.3.1-cuda12.1-cudnn8-runtime AS gpu
+
+# Paquetes del sistema necesarios para VTK / PyMeshLab
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 libglib2.0-0 libxrender1 libsm6 libxext6 libglvnd0 \
+    gcc g++ \
+  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Install runtime deps
-COPY requirements-backend.txt ./
-RUN pip install --no-cache-dir -r requirements-backend.txt
+# Instala deps Python
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -U pip setuptools wheel \
+ && pip install --no-cache-dir cupy-cuda12x==13.0.0 \
+ && pip install --no-cache-dir -r requirements.txt
+# Nota: torch/torchvision/torchaudio ya vienen en la imagen base GPU
 
-# Copy source
-COPY app ./app
+# Copia tu aplicación
+COPY . .
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app \
+    PORT=8000
 
 EXPOSE 8000
+CMD ["uvicorn","app.main:app","--host","0.0.0.0","--port","8000","--workers","1"]
 
-# Healthcheck (optional)
-HEALTHCHECK CMD python -c "import socket,sys; s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1',8000)); s.close()" || exit 1
+############################
+# Stage CPU (sin CUDA)
+############################
+FROM python:3.10-slim AS cpu
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 libglib2.0-0 libxrender1 libsm6 libxext6 libglvnd0 \
+    gcc g++ \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# PyTorch CPU desde el índice oficial
+ARG TORCH_VER=2.3.1
+ARG TV_VER=0.18.1
+ARG TA_VER=2.3.1
+
+RUN pip install --no-cache-dir -U pip setuptools wheel \
+ && pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
+      torch==${TORCH_VER} torchvision==${TV_VER} torchaudio==${TA_VER}
+
+# Resto de dependencias
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copia tu aplicación
+COPY . .
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app \
+    PORT=8000
+
+EXPOSE 8000
+CMD ["uvicorn","app.main:app","--host","0.0.0.0","--port","8000","--workers","1"]

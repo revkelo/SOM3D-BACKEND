@@ -224,7 +224,10 @@ def hospital_start_subscription(payload: HospitalStartSubscriptionIn, db: Sessio
             raise HTTPException(status_code=404, detail="El hospital no tiene una suscripcion pendiente (PAUSADA)")
         plan = db.query(Plan).filter(Plan.id_plan == sus.id_plan).first()
 
-    invoice = f"3DVinciStudio-H{h.id_hospital}-S{sus.id_suscripcion}"
+    # ePayco requiere invoice unico por intento
+    from datetime import datetime
+    import secrets
+    invoice = f"3DVinciStudio-H{h.id_hospital}-S{sus.id_suscripcion}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{secrets.token_hex(2)}"
     amount = f"{float(plan.precio):.2f}"
     name = f"Plan {plan.nombre} (Hospital)"
     description = f"Suscripcion {plan.periodo} ({plan.duracion_meses} meses)"

@@ -19,6 +19,7 @@ def list_patients(
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
     estado: str | None = Query(None, description="Filtrar por estado"),
+    doc_numero: str | None = Query(None, description="Buscar por cédula/documento"),
 ):
     q = db.query(Paciente)
     if getattr(user, "rol", None) != "ADMINISTRADOR":
@@ -32,6 +33,12 @@ def list_patients(
         q = q.filter(Paciente.id_medico == med.id_medico)
     if estado:
         q = q.filter(Paciente.estado == estado)
+    if doc_numero:
+        try:
+            like = f"%{doc_numero}%"
+        except Exception:
+            like = doc_numero
+        q = q.filter(Paciente.doc_numero.like(like))
     return q.order_by(Paciente.creado_en.desc()).all()
 
 

@@ -16,6 +16,7 @@ from .routes.som3d import router as som3d_router
 from .routes.patients import router as patients_router
 from .routes.studies import router as studies_router
 from .routes.visor import router as visor_router
+from .routes.hospitals import router as hospitals_router
 
 # Cargar variables de entorno desde .env si existe
 try:
@@ -44,6 +45,7 @@ app.include_router(som3d_router)   # /som3d/...
 app.include_router(patients_router)  # /patients
 app.include_router(studies_router)   # /studies
 app.include_router(visor_router)     # /visor
+app.include_router(hospitals_router) # /hospitals
 app.include_router(doctors_router)   # /admin/doctors
 app.include_router(admin_router)     # /admin/metrics
 app.include_router(admin_hospitals_router)  # /admin/hospitals

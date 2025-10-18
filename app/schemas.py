@@ -51,6 +51,8 @@ class HospitalIn(BaseModel):
     telefono: Optional[str] = Field(default=None, max_length=30)
     correo: Optional[EmailStr] = None
     codigo: Optional[str] = Field(default=None, min_length=1, max_length=12)
+    # Opcional: al crear el hospital, asociarlo a un plan creando una Suscripcion en PAUSADA
+    plan_id: Optional[int] = None
 
 class HospitalUpdateIn(BaseModel):
     nombre: Optional[str] = Field(default=None, max_length=150)
@@ -73,6 +75,15 @@ class HospitalOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class HospitalLinkByCodeIn(BaseModel):
+    codigo: str = Field(min_length=1, max_length=12)
+
+
+class HospitalStartSubscriptionIn(BaseModel):
+    codigo: str = Field(min_length=1, max_length=12)
+    plan_id: Optional[int] = None
 
 
 # --------------------

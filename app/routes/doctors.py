@@ -5,7 +5,7 @@ from sqlalchemy import func
 from ..db import get_db
 from ..core.security import get_current_user, hash_password
 from ..models import Usuario, Medico, Hospital, Suscripcion, Pago, Paciente, Estudio, VisorEstado, JobSTL, JobConv
-from ..schemas_doctors import DoctorIn, DoctorUpdateIn, DoctorOut
+from ..schemas import DoctorIn, DoctorUpdateIn, DoctorOut
 
 
 router = APIRouter()

@@ -50,7 +50,7 @@ class HospitalIn(BaseModel):
     ciudad: Optional[str] = Field(default=None, max_length=100)
     telefono: Optional[str] = Field(default=None, max_length=30)
     correo: Optional[EmailStr] = None
-    codigo: str = Field(min_length=1, max_length=12)
+    codigo: Optional[str] = Field(default=None, min_length=1, max_length=12)
 
 class HospitalUpdateIn(BaseModel):
     nombre: Optional[str] = Field(default=None, max_length=150)

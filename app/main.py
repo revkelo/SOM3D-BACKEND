@@ -1,11 +1,16 @@
 from fastapi import FastAPI
+import os
+from starlette.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv, find_dotenv
 
 from .routes.auth import router as auth_router
 from .routes.plans import router as plans_router
 from .routes.subscriptions import router as subs_router
-from .routes.hospitals import router as hospitals_router
+from .routes.doctors import router as doctors_router
+from .routes.admin import router as admin_router
+from .routes.admin_hospitals import router as admin_hospitals_router
+from .routes.admin_users import router as admin_users_router
 from .api.epayco import router as epayco_router
 from .routes.som3d import router as som3d_router
 from .routes.patients import router as patients_router
@@ -39,7 +44,15 @@ app.include_router(som3d_router)   # /som3d/...
 app.include_router(patients_router)  # /patients
 app.include_router(studies_router)   # /studies
 app.include_router(visor_router)     # /visor
-app.include_router(hospitals_router) # /hospitals
+app.include_router(doctors_router)   # /admin/doctors
+app.include_router(admin_router)     # /admin/metrics
+app.include_router(admin_hospitals_router)  # /admin/hospitals
+app.include_router(admin_users_router)      # /admin/users
+
+# Static files (admin dashboard)
+static_dir = os.path.join(os.path.dirname(__file__), "static")
+if os.path.isdir(static_dir):
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 @app.get("/health")
 def health():

@@ -99,3 +99,11 @@ BASE_URL=https://api.tu-dominio.com
 P_CUST_ID_CLIENTE=tu_id_cliente
 P_KEY=tu_p_key
 USE_NGROK_SKIP=false
+ 
+ 
+Admin (dashboard)
+- `GET /admin/hospitals/generate-code` (Bearer ADMIN) — genera un código único disponible
+- `GET /admin/hospitals` | `GET /admin/hospitals/{id}` | `POST /admin/hospitals` | `PATCH /admin/hospitals/{id}` | `DELETE /admin/hospitals/{id}` (Bearer ADMIN; en POST el código se genera automáticamente si no se envía)
+- `GET /admin/doctors` | `PATCH /admin/doctors/{id}` | `DELETE /admin/doctors/{id}` (Bearer ADMIN)
+- `GET /admin/doctors/count` (Bearer ADMIN) — admite `hospital_id` para filtrar
+- `GET /admin/metrics` (Bearer ADMIN) — totales de hospitales, médicos, pacientes, estudios, suscripciones y pagos; incluye distribución de médicos por hospital

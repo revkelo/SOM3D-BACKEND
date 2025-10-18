@@ -31,6 +31,72 @@ async function ensureAuth() {
 }
 
 // ========================
+// Helpers de depuración (LOG de la petición)
+// ========================
+const DEBUG_SOM3D = true; // pon en false si no quieres logs
+
+function maskToken(raw) {
+  if (!raw) return raw;
+  const t = String(raw);
+  if (t.length <= 14) return t.replace(/.(?=.{4})/g, '*');
+  // preserva "Bearer " y últimos 6 chars
+  const prefix = t.startsWith('Bearer ') ? 'Bearer ' : '';
+  const core = t.replace(/^Bearer\s+/, '');
+  return prefix + core.replace(/.(?=.{6}$)/g, '*');
+}
+
+function summarizeFormData(fd) {
+  const out = [];
+  for (const [k, v] of fd.entries()) {
+    if (v instanceof File) {
+      out.push({
+        key: k,
+        file: { name: v.name, size: v.size, type: v.type || 'application/zip' }
+      });
+    } else {
+      out.push({ key: k, value: String(v) });
+    }
+  }
+  return out;
+}
+
+function buildCurl(url, method, headers, fd) {
+  const parts = [`curl '${url}' -X ${method}`];
+  Object.entries(headers || {}).forEach(([k, v]) => {
+    const mv = (k.toLowerCase() === 'authorization') ? maskToken(v) : v;
+    parts.push(`-H "${k}: ${mv}"`);
+  });
+  // Nota: boundary la pone el navegador; en curl usamos -F para multipart
+  for (const [k, v] of fd.entries()) {
+    if (v instanceof File) {
+      parts.push(`-F "${k}=@${v.name}"`);
+    } else {
+      // escapado simple de comillas
+      const val = String(v).replace(/"/g, '\\"');
+      parts.push(`-F "${k}=${val}"`);
+    }
+  }
+  return parts.join(' ');
+}
+
+function debugLogRequest(url, method, headers, fd) {
+  if (!DEBUG_SOM3D) return;
+  const maskedHeaders = Object.fromEntries(
+    Object.entries(headers || {}).map(([k, v]) => [
+      k,
+      k.toLowerCase() === 'authorization' ? maskToken(v) : v
+    ])
+  );
+  console.groupCollapsed(`[SOM3D] ${method} ${url}`);
+  console.log('URL:', url);
+  console.log('Method:', method);
+  console.log('Headers:', maskedHeaders);
+  console.log('Body (FormData):', summarizeFormData(fd));
+  console.log('cURL equivalente:\n', buildCurl(url, method, headers, fd));
+  console.groupEnd();
+}
+
+// ========================
 // Drag & Drop .zip bonito
 // ========================
 const dropZone = document.getElementById('drop_zone');
@@ -49,7 +115,8 @@ function fmtBytes(bytes) {
   if (!bytes && bytes !== 0) return '';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
   let i = 0; let v = bytes;
-  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++;
+  }
   return `${v.toFixed(v < 10 ? 2 : 1)} ${units[i]}`;
 }
 
@@ -70,17 +137,17 @@ function acceptZip(file) {
   return file && /\.zip$/i.test(file.name);
 }
 
-dropZone.addEventListener('click', () => fileInput.click());
-changeFileBtn.addEventListener('click', () => fileInput.click());
+dropZone?.addEventListener('click', () => fileInput.click());
+changeFileBtn?.addEventListener('click', () => fileInput.click());
 
-dropZone.addEventListener('dragover', (e) => {
+dropZone?.addEventListener('dragover', (e) => {
   e.preventDefault();
   dropZone.classList.add('border-cyan-400', 'bg-black/30');
 });
-dropZone.addEventListener('dragleave', () => {
+dropZone?.addEventListener('dragleave', () => {
   dropZone.classList.remove('border-cyan-400', 'bg-black/30');
 });
-dropZone.addEventListener('drop', (e) => {
+dropZone?.addEventListener('drop', (e) => {
   e.preventDefault();
   dropZone.classList.remove('border-cyan-400', 'bg-black/30');
   const file = e.dataTransfer.files?.[0];
@@ -89,7 +156,7 @@ dropZone.addEventListener('drop', (e) => {
   fileInput.files = e.dataTransfer.files;
   showFileState(file);
 });
-fileInput.addEventListener('change', () => {
+fileInput?.addEventListener('change', () => {
   const file = fileInput.files?.[0];
   if (!file) { clearFile(); return; }
   if (!acceptZip(file)) { clearFile(); fileMsg.textContent = 'Archivo inválido: debe ser .zip'; return; }
@@ -150,9 +217,17 @@ async function searchByCedula() {
 }
 
 // ========================
-// Crear Job (con progreso real y validación)
+// Crear Job (con progreso + LOG de petición)
 // ========================
 const submitBtn = document.getElementById('submit_btn');
+
+function anyTaskSelected() {
+  const ids = ['enable_ortopedia','enable_appendicular','enable_muscles','enable_hip_implant','teeth','cranio'];
+  return ids.some(id => {
+    const el = document.getElementById(id);
+    return !!(el && el.checked);
+  });
+}
 
 async function submitSomJob(ev) {
   ev.preventDefault();
@@ -167,6 +242,16 @@ async function submitSomJob(ev) {
   const file = fileInput.files?.[0];
   if (!file) { msg.textContent = 'Selecciona un .zip'; fileInput.click(); return; }
 
+  // Validar que al menos una tarea de segmentación esté seleccionada
+  const tasksError = document.getElementById('tasks_error');
+  if (!anyTaskSelected()) {
+    if (tasksError) tasksError.classList.remove('hidden');
+    msg.textContent = 'Selecciona al menos una tarea de segmentación';
+    return;
+  } else {
+    if (tasksError) tasksError.classList.add('hidden');
+  }
+
   // construir FormData
   const fd = new FormData();
   fd.append('file', file);
@@ -179,14 +264,20 @@ async function submitSomJob(ev) {
     }
   });
 
-  submitBtn.disabled = true; submitBtn.textContent = 'Subiendo...';
+  submitBtn.disabled = true; submitBtn.textContent = 'Generando...';
   setUploadProgress(0);
 
   try {
+    const url = api('/som3d/jobs');
+    const headers = { Authorization: 'Bearer ' + token() };
+
+    // LOG de la petición antes de enviar
+    debugLogRequest(url, 'POST', headers, fd);
+
     // XHR para poder reportar progreso
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', api('/som3d/jobs'));
-    xhr.setRequestHeader('Authorization', 'Bearer ' + token());
+    xhr.open('POST', url);
+    xhr.setRequestHeader('Authorization', headers.Authorization);
 
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable) {
@@ -221,7 +312,7 @@ async function submitSomJob(ev) {
     msg.classList.add('text-red-400');
     msg.textContent = err.message || String(err);
   } finally {
-    submitBtn.disabled = false; submitBtn.textContent = 'Crear Job';
+    submitBtn.disabled = false; submitBtn.textContent = 'Generar Figura Tridimensional';
   }
 }
 
@@ -341,10 +432,9 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // Respaldo: asegurar que toda la tarjeta togglea el checkbox
+  // Respaldo: que toda la tarjeta togglee el checkbox
   document.querySelectorAll('.task-card').forEach(card => {
     card.addEventListener('click', (ev) => {
-      // si se hace click en enlaces/inputs internos, dejamos el comportamiento nativo
       if (ev.target.tagName === 'INPUT' || ev.target.closest('input')) return;
       const cb = card.querySelector('input[type="checkbox"]');
       if (cb) cb.checked = !cb.checked;

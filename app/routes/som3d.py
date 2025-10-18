@@ -262,7 +262,7 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
                 wlog("Iniciando TotalSegmentator ...")
                 runner = TotalSegmentatorRunner(
                     robust_import=True,
-                    enable_ortopedia=bool(params.get("enable_ortopedia", True)),
+                    enable_ortopedia=bool(params.get("enable_ortopedia", False)),
                     enable_appendicular=bool(params.get("enable_appendicular", False)),
                     enable_muscles=bool(params.get("enable_muscles", False)),
                     enable_hip_implant=bool(params.get("enable_hip_implant", False)),
@@ -288,7 +288,9 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
                 return
 
             try:
-                zip_bytes = _zip_dir_to_bytes(stl_out)
+                hq_dir = stl_out / "hq_suavizado_decimado"
+                target = hq_dir if (hq_dir.exists() and any(hq_dir.rglob('*.stl'))) else stl_out
+                zip_bytes = _zip_dir_to_bytes(target)
                 s3.upload_bytes(zip_bytes, s3_key(RESULT_ZIP), content_type="application/zip")
                 wlog("ZIP subido a S3.")
             except Exception as e:
@@ -298,7 +300,9 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
             # Ya no subimos STL individuales; calcular cuenta localmente
             keys = []
             try:
-                stl_count = int(len([p for p in stl_out.rglob('*.stl')]))
+                hq_dir = stl_out / "hq_suavizado_decimado"
+                base = hq_dir if hq_dir.exists() else stl_out
+                stl_count = int(len([p for p in base.rglob('*.stl')]))
             except Exception:
                 stl_count = 0
             stl_zip_size = int(len(zip_bytes or b""))
@@ -341,7 +345,7 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
 @router.post("/jobs")
 async def create_job(
     file: UploadFile = File(..., description=".zip con DICOMs"),
-    enable_ortopedia: bool = Form(True),
+    enable_ortopedia: bool = Form(False),
     enable_appendicular: bool = Form(False),
     enable_muscles: bool = Form(False),
     enable_hip_implant: bool = Form(False),

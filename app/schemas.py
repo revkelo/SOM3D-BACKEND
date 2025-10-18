@@ -263,6 +263,20 @@ class JobSTLOut(BaseModel):
 
 
 # --------------------
+# Som3D: Pacientes con STL
+# --------------------
+class PatientJobSTLOut(BaseModel):
+    id_jobstl: int
+    job_id: str
+    id_paciente: int
+    nombres: Optional[str] = None
+    apellidos: Optional[str] = None
+    doc_numero: Optional[str] = None
+    created_at: Optional[str] = None
+
+
+
+# --------------------
 # VisorEstado
 # --------------------
 class VisorEstadoIn(BaseModel):

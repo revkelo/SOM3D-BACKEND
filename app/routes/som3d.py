@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 import json
 
 from fastapi import APIRouter, File, Form, UploadFile, HTTPException, Depends
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from app.services.s3_manager import S3Manager, S3Config
 from app.services.som3d.totalsegmentator import TotalSegmentatorRunner
@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 from ..db import get_db
 from ..core.security import get_current_user, get_current_user_optional
 from ..models import JobConv, JobSTL, Paciente, Medico
-from ..schemas import FinalizeJobIn, JobSTLOut
+from ..schemas import FinalizeJobIn, JobSTLOut, PatientJobSTLOut
 from ..core.config import mysql_url
 
 
@@ -725,3 +725,51 @@ def _require_s3_env():
         return
     # endpoint presente, ok
     return
+
+
+@router.get("/patients-with-stl", response_model=list[PatientJobSTLOut])
+def patients_with_stl(db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """Lista pacientes que tienen registros en JobSTL.
+    - Admin: ve todos
+    - Médico: solo sus pacientes
+    Devuelve id_jobstl, job_id, id_paciente y datos básicos del paciente.
+    """
+    q = db.query(JobSTL, Paciente).join(Paciente, JobSTL.id_paciente == Paciente.id_paciente)
+    if getattr(user, "rol", None) != "ADMINISTRADOR":
+        med = db.query(Medico).filter(Medico.id_usuario == user.id_usuario).first()
+        if not med:
+            return []
+        q = q.filter(Paciente.id_medico == med.id_medico)
+    rows = q.order_by(JobSTL.created_at.desc()).all()
+    out: list[PatientJobSTLOut] = []
+    for js, p in rows:
+        out.append(PatientJobSTLOut(
+            id_jobstl=js.id_jobstl,
+            job_id=js.job_id,
+            id_paciente=js.id_paciente,
+            nombres=getattr(p, "nombres", None),
+            apellidos=getattr(p, "apellidos", None),
+            doc_numero=getattr(p, "doc_numero", None),
+            created_at=str(getattr(js, "created_at", "")) if getattr(js, "created_at", None) else None,
+        ))
+    return out
+
+
+@router.get("/jobs/{job_id}/result/bytes")
+async def download_result_zip_bytes(job_id: str):
+    """Descarga el ZIP de resultados desde S3 y lo devuelve en la misma
+    respuesta, para evitar problemas de CORS con URLs presignadas.
+    """
+    s3 = _ensure_s3()
+    key = _s3_key(job_id, RESULT_ZIP)
+    if not s3.exists(key):
+        raise HTTPException(status_code=404, detail="ZIP no encontrado en S3")
+    try:
+        data = s3.download_bytes(key)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"S3 download error: {e}")
+    headers = {
+        "Content-Disposition": f"inline; filename=stl_result_{job_id}.zip",
+        "Cache-Control": "private, max-age=60",
+    }
+    return Response(content=data, media_type="application/zip", headers=headers)

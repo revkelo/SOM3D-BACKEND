@@ -286,16 +286,40 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
                 return
 
             keys = s3.list(s3_key(RESULT_SUBDIR)) or []
+            stl_count = int(len([k for k in keys if k.lower().endswith('.stl')]))
+            stl_zip_size = int(len(zip_bytes or b""))
             write_manifest_patch({
                 "status": "done",
                 "phase": "finished",
                 "percent": 100.0,
                 "error": None,
-                "metrics": {"stl_count": int(len([k for k in keys if k.lower().endswith('.stl')]))},
+                "metrics": {"stl_count": stl_count, "stl_zip_size": stl_zip_size},
                 "s3_keys_results": keys,
             })
             wlog("Job terminado.")
             _update_jobconv("DONE", set_finished=True)
+
+            # Registrar JobSTL en BD si hay db_url y un paciente asociado en params
+            try:
+                pid = params.get("id_paciente") if isinstance(params, dict) else None
+                if db_url and pid:
+                    engine = create_engine(db_url, pool_pre_ping=True, future=True)
+                    with engine.begin() as conn:
+                        conn.execute(
+                            _sql_text(
+                                "INSERT INTO JobSTL (job_id, id_paciente, stl_size, num_stl_archivos) "
+                                "VALUES (:job_id, :id_paciente, :stl_size, :num)"
+                            ),
+                            {
+                                "job_id": job_id,
+                                "id_paciente": int(pid),
+                                "stl_size": int(stl_zip_size),
+                                "num": int(stl_count),
+                            },
+                        )
+                    wlog("Registro JobSTL guardado en BD.")
+            except Exception as e:
+                wlog(f"Error guardando JobSTL en BD: {e}")
     except Exception as e:
         save_worker_error("fatal", e)
 
@@ -361,6 +385,7 @@ async def create_job(
             "enable_appendicular": enable_appendicular,
             "enable_muscles": enable_muscles,
             "enable_hip_implant": enable_hip_implant,
+            "id_paciente": (int(id_paciente) if id_paciente is not None else None),
             "extra_tasks": extra_list,
         },
         metrics={},
@@ -441,6 +466,26 @@ async def list_jobs():
     return {"jobs": manifests}
 
 
+@router.get("/jobs/mine")
+async def list_my_jobs(db: Session = Depends(get_db), user = Depends(get_current_user)):
+    """Lista solo los jobs creados por el usuario autenticado (JobConv.id_usuario).
+    Enriquecido con datos del manifiesto en S3 si existe (status/phase/percent).
+    """
+    # Obtener entradas JobConv del usuario
+    entries = db.query(JobConv).filter(JobConv.id_usuario == user.id_usuario).order_by(JobConv.updated_at.desc()).all()
+    items: List[Dict[str, Any]] = []
+    for jc in entries:
+        m = _load_manifest(jc.job_id)
+        items.append({
+            "job_id": jc.job_id,
+            "status": (m.status if m else jc.status),
+            "phase": (m.phase if m else None),
+            "percent": (m.percent if m else (100.0 if jc.status == "DONE" else 0.0)),
+            "updated_at": getattr(jc, "updated_at", None),
+        })
+    return {"jobs": items}
+
+
 @router.get("/jobs/{job_id}")
 async def get_job(job_id: str):
     m = _load_manifest(job_id)
@@ -461,14 +506,46 @@ async def get_progress(job_id: str):
 async def get_log(job_id: str, tail: int = 200):
     s3 = _ensure_s3()
     log_key = _s3_key(job_id, LOG_KEY)
+    lines: list[str] = []
+    used_fallback = False
     try:
         data = s3.download_bytes(log_key)
         lines = data.decode("utf-8", errors="ignore").splitlines()
-        if tail and tail > 0:
-            lines = lines[-int(tail):]
-        return {"job_id": job_id, "lines": lines}
     except Exception:
-        return {"job_id": job_id, "lines": []}
+        # Fallback: usar log_tail del manifest si existe
+        m = _load_manifest(job_id)
+        if m and m.log_tail:
+            lines = list(m.log_tail)
+            used_fallback = True
+        else:
+            lines = []
+
+    if tail and tail > 0:
+        try:
+            t = int(tail)
+            if t > 0:
+                lines = lines[-t:]
+        except Exception:
+            pass
+
+    # Adjuntar estado/fase desde manifest si disponible
+    status = None
+    phase = None
+    try:
+        m2 = _load_manifest(job_id)
+        if m2:
+            status = m2.status
+            phase = m2.phase
+    except Exception:
+        pass
+
+    return {
+        "job_id": job_id,
+        "lines": lines,
+        "fallback": used_fallback,
+        "status": status,
+        "phase": phase,
+    }
 
 
 @router.get("/jobs/{job_id}/stls")

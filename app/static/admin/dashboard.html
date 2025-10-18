@@ -1,641 +1,242 @@
-<!doctype html>
+﻿<!DOCTYPE html>
 <html lang="es">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Admin Dashboard</title>
-  <style>
-    body{font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,sans-serif; background:#0b0f17; color:#e5e7eb; margin:0}
-    header{display:flex; align-items:center; justify-content:space-between; padding:12px 16px; background:#111827; border-bottom:1px solid #374151}
-    h1{margin:0; font-size:18px}
-    button{padding:8px 12px; border-radius:8px; background:#22d3ee; color:#111827; font-weight:700; border:0; cursor:pointer}
-    main{padding:16px; display:grid; grid-template-columns: 1fr; gap:16px; max-width:1100px; margin:auto}
-    .grid{display:grid; grid-template-columns: repeat(auto-fit,minmax(260px,1fr)); gap:16px}
-    .grid2{display:grid; grid-template-columns: 1.2fr 1fr; gap:16px}
-    .card{background:#111827; border:1px solid #374151; border-radius:12px; padding:16px}
-    .muted{opacity:.8}
-    input, select{width:100%; padding:8px 10px; background:#0b0f17; border:1px solid #374151; border-radius:8px; color:#e5e7eb}
-    label{display:block; font-size:13px; margin:8px 0 6px}
-    table{width:100%; border-collapse:collapse}
-    th, td{border-bottom:1px solid #374151; padding:8px; text-align:left; font-size:14px}
-    .row{display:grid; grid-template-columns:1fr; gap:12px}
-    .actions{display:flex; gap:8px; flex-wrap:wrap}
-    .warn{background:#fca5a5; color:#111827}
-    .ok{background:#86efac; color:#111827}
-    .err{color:#fca5a5; min-height:20px}
-    .grid2p{display:grid; grid-template-columns: 1.2fr 1fr; gap:16px}
-    .grid3{display:grid; grid-template-columns: repeat(auto-fit,minmax(320px,1fr)); gap:16px}
-  </style>
-  <script>
-    // API base resolution: ?api=... overrides; else localStorage; else default to :8000 when not on :8000
-    const urlParams = new URLSearchParams(location.search);
-    const apiParam = urlParams.get('api');
-    if(apiParam){ localStorage.setItem('som3d_api', apiParam); }
-    function apiBase(){
-      const saved = localStorage.getItem('som3d_api');
-      if(saved) return saved.replace(/\/$/, '');
-      if(/:8000$/.test(location.origin)) return '';
-      const u = new URL(location.href);
-      return `${u.protocol}//${u.hostname}:8000`;
-    }
-    function api(path){ return apiBase() + path; }
-    function token(){ return localStorage.getItem('som3d_token'); }
-    function authHeaders(){ return { Authorization: 'Bearer ' + token() }; }
-    function logout(){ localStorage.removeItem('som3d_token'); location.href='/static/admin/login.html'; }
-    let currentHospitalId = null;
-    let currentPlanId = null;
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="shortcut icon" href="/assets/favicon.ico" />
+    <title>3DVinci Health — SOM3D</title>
+    <!-- CDN solo para desarrollo; en prod, usa CLI/PostCSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
 
-    async function ensureAdmin(){
-      const t = token();
-      if(!t){ location.href='/static/admin/login.html'; return false; }
-      const res = await fetch(api('/auth/me'), { headers: authHeaders() });
-      if(!res.ok){ logout(); return false; }
-      const me = await res.json();
-      if(me.rol !== 'ADMINISTRADOR'){ alert('Se requiere ADMIN'); logout(); return false; }
-      document.getElementById('user').textContent = me.correo + ' (' + me.rol + ')';
-      return true;
-    }
+    <!-- Fallback CSS para switches (funciona aunque Tailwind no soporte peer-checked) -->
+    <style>
+      .sw {
+        position: relative; width: 44px; height: 24px; border-radius: 9999px;
+        background: #475569; /* slate-600 */
+        transition: background .22s ease;
+        flex: 0 0 44px;
+      }
+      .sw::after{
+        content:""; position:absolute; top:2px; left:2px; width:20px; height:20px;
+        background:#fff; border-radius:9999px; box-shadow:0 1px 2px rgba(0,0,0,.25);
+        transition: transform .22s ease;
+      }
+      /* checked -> azul + knob a la derecha */
+      input[type="checkbox"].sw-input:checked + .sw{ background:#0891b2; } /* cyan-700 */
+      input[type="checkbox"].sw-input:checked + .sw::after{ transform: translateX(20px); }
+      /* accesibilidad: foco visible al tabular */
+      input[type="checkbox"].sw-input:focus-visible + .sw{ outline:2px solid #22d3ee; outline-offset:2px; }
+    </style>
+  </head>
 
-    async function loadMetrics(){
-      const el = document.getElementById('metrics');
-      el.textContent = 'Cargando...';
-      const res = await fetch(api('/admin/metrics'), { headers: authHeaders() });
-      if(!res.ok){ el.textContent = 'Error cargando métricas'; return; }
-      const m = await res.json();
-      el.innerHTML = `
-        <div class="grid">
-          <div class="card"><b>Hospitales</b><div class="muted">Total: ${m.hospitals.total} | Activos: ${m.hospitals.activos}</div></div>
-          <div class="card"><b>Médicos</b><div class="muted">Total: ${m.doctors.total} | Activos: ${m.doctors.activos}</div></div>
-          <div class="card"><b>Pacientes</b><div class="muted">${m.patients}</div></div>
-          <div class="card"><b>Estudios</b><div class="muted">${m.studies}</div></div>
-          <div class="card"><b>Suscripciones</b><div class="muted">Total: ${m.subscriptions.total} | Activas: ${m.subscriptions.activas}</div></div>
-        </div>
-        <div class="card" style="margin-top:16px">
-          <b>Doctores por hospital</b>
-          <table><thead><tr><th>Hospital</th><th>Doctores</th></tr></thead>
-          <tbody>${m.doctors_by_hospital.map(r=>`<tr><td>${r.nombre}</td><td>${r.doctores}</td></tr>`).join('')}</tbody></table>
-        </div>`;
-    }
-
-    async function loadDoctors(){
-      const list = document.getElementById('doctors_list');
-      list.innerHTML = '<tr><td colspan="6">Cargando...</td></tr>';
-      const q = document.getElementById('search').value.trim();
-      const params = new URLSearchParams();
-      if(q) params.set('q', q);
-      const res = await fetch(api('/admin/doctors?') + params.toString(), { headers: authHeaders() });
-      if(!res.ok){ list.innerHTML = '<tr><td colspan="6">Error</td></tr>'; return; }
-      const rows = await res.json();
-      if(!rows.length){ list.innerHTML = '<tr><td colspan="6">Sin resultados</td></tr>'; return; }
-      list.innerHTML = rows.map(d=>`<tr>
-        <td>${d.id_medico}</td>
-        <td>${d.nombre} ${d.apellido}</td>
-        <td>${d.correo}</td>
-        <td>${d.id_hospital ?? ''}</td>
-        <td>${d.estado}</td>
-        <td class="actions">
-          <button class="warn" onclick="deleteDoctor(${d.id_medico})">Borrar</button>
-        </td>
-      </tr>`).join('');
-    }
-
-    async function loadRecentPayments(){
-      const list = document.getElementById('recent_payments');
-      if(!list) return;
-      list.innerHTML = '<tr><td colspan="4">Cargando...</td></tr>';
-      const res = await fetch(api('/admin/overview/recent-payments?limit=10'), { headers: authHeaders() });
-      if(!res.ok){ list.innerHTML = '<tr><td colspan="4">Error</td></tr>'; return; }
-      const rows = await res.json();
-      if(!rows.length){ list.innerHTML = '<tr><td colspan="4">Sin datos</td></tr>'; return; }
-      list.innerHTML = rows.map(p=>`<tr>
-        <td>${p.fecha_pago ?? ''}</td>
-        <td>${p.monto}</td>
-        <td>${p.referencia ?? ''}</td>
-        <td>${p.owner ? (p.owner.type==='MEDICO' ? (p.owner.correo || ((p.owner.nombre||'')+' '+(p.owner.apellido||''))) : ('Hospital: '+(p.owner.nombre||''))) : ''}</td>
-      </tr>`).join('');
-    }
-
-    async function loadActiveUsersSubs(){
-      const list = document.getElementById('active_users_subs');
-      if(!list) return;
-      list.innerHTML = '<tr><td colspan="6">Cargando...</td></tr>';
-      const res = await fetch(api('/admin/overview/active-users-subs'), { headers: authHeaders() });
-      if(!res.ok){ list.innerHTML = '<tr><td colspan="6">Error</td></tr>'; return; }
-      const rows = await res.json();
-      if(!rows.length){ list.innerHTML = '<tr><td colspan="6">Sin usuarios activos con suscripción</td></tr>'; return; }
-      list.innerHTML = rows.map(r=>`<tr>
-        <td>${r.nombre} ${r.apellido}</td>
-        <td>${r.correo}</td>
-        <td>${r.hospital ?? ''}</td>
-        <td>${r.plan ?? ''}</td>
-        <td>${r.periodo ?? ''}</td>
-        <td>${r.fecha_expiracion ?? ''}</td>
-      </tr>`).join('');
-    }
-
-    async function loadHospitalsBilling(){
-      const list = document.getElementById('hosp_billing');
-      if(!list) return;
-      list.innerHTML = '<tr><td colspan="5">Cargando...</td></tr>';
-      const res = await fetch(api('/admin/overview/hospitals-billing'), { headers: authHeaders() });
-      if(!res.ok){ list.innerHTML = '<tr><td colspan="5">Error</td></tr>'; return; }
-      const rows = await res.json();
-      if(!rows.length){ list.innerHTML = '<tr><td colspan="5">Sin datos</td></tr>'; return; }
-      list.innerHTML = rows.map(r=>`<tr>
-        <td>${r.nombre}</td>
-        <td>${r.suscripciones}</td>
-        <td>${r.pagos}</td>
-        <td>${r.monto}</td>
-        <td>${r.ultimo_pago ?? ''}</td>
-      </tr>`).join('');
-    }
-
-    function periodoDuracion(periodo){
-      return periodo === 'MENSUAL' ? 1 : periodo === 'TRIMESTRAL' ? 3 : 12;
-    }
-
-    async function loadPlans(){
-      const list = document.getElementById('plans_list');
-      if(!list) return;
-      list.innerHTML = '<tr><td colspan="6">Cargando...</td></tr>';
-      const res = await fetch(api('/plans'), { headers: authHeaders() });
-      if(!res.ok){ list.innerHTML = '<tr><td colspan="6">Error</td></tr>'; return; }
-      const rows = await res.json();
-      if(!rows.length){ list.innerHTML = '<tr><td colspan="6">Sin resultados</td></tr>'; return; }
-      list.innerHTML = rows.map(p=>`<tr>
-        <td>${p.id_plan}</td>
-        <td>${p.nombre}</td>
-        <td>${p.precio}</td>
-        <td>${p.periodo}</td>
-        <td>${p.duracion_meses}</td>
-        <td class="actions">
-          <button onclick="selectPlan(${p.id_plan}, '${p.nombre.replace(/'/g,"&#39;")}', ${p.precio}, '${p.periodo}', ${p.duracion_meses})">Editar</button>
-          <button class="warn" onclick="deletePlan(${p.id_plan})">Borrar</button>
-        </td>
-      </tr>`).join('');
-    }
-
-    async function createPlan(ev){
-      ev.preventDefault();
-      const f = ev.target;
-      const periodo = f.periodo.value;
-      const payload = {
-        nombre: f.nombre.value.trim(),
-        precio: Number(f.precio.value),
-        periodo,
-        duracion_meses: periodoDuracion(periodo)
-      };
-      const btn = f.querySelector('button[type="submit"]');
-      const msg = document.getElementById('plan_create_msg');
-      msg.textContent = '';
-      btn.disabled = true; btn.textContent = 'Creando...';
-      try{
-        const res = await fetch(api('/plans'), { method:'POST', headers: { ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify(payload)});
-        const data = await res.json().catch(()=>null);
-        if(!res.ok){ throw new Error((data && data.detail) || 'Error al crear'); }
-        f.reset();
-        msg.textContent = 'Plan creado';
-        loadPlans();
-      }catch(err){ msg.textContent = err.message || String(err); }
-      finally{ btn.disabled = false; btn.textContent = 'Crear'; }
-    }
-
-    function selectPlan(id, nombre, precio, periodo, duracion){
-      currentPlanId = id;
-      const c = document.getElementById('plan_edit');
-      c.style.display = 'block';
-      c.querySelector('[name="nombre"]').value = nombre || '';
-      c.querySelector('[name="precio"]').value = precio != null ? precio : '';
-      c.querySelector('[name="periodo"]').value = periodo || 'MENSUAL';
-      c.querySelector('[name="duracion_meses"]').value = duracion != null ? duracion : '';
-      document.getElementById('plan_edit_msg').textContent = '';
-      c.scrollIntoView({behavior:'smooth', block:'center'});
-    }
-
-    function cancelEditPlan(){
-      currentPlanId = null;
-      document.getElementById('plan_edit').style.display = 'none';
-    }
-
-    async function savePlan(ev){
-      ev.preventDefault();
-      if(!currentPlanId) return;
-      const f = ev.target;
-      const payload = {};
-      const nombre = f.nombre.value.trim(); if(nombre) payload.nombre = nombre;
-      const precio = f.precio.value; if(precio !== '') payload.precio = Number(precio);
-      const periodo = f.periodo.value; if(periodo) payload.periodo = periodo;
-      // Duración coherente con periodo (backend también valida)
-      payload.duracion_meses = periodoDuracion(periodo);
-      const btn = f.querySelector('button[type="submit"]');
-      const msg = document.getElementById('plan_edit_msg');
-      msg.textContent = '';
-      btn.disabled = true; btn.textContent = 'Guardando...';
-      try{
-        const res = await fetch(api('/plans/' + currentPlanId), { method:'PATCH', headers: { ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify(payload)});
-        const data = await res.json().catch(()=>null);
-        if(!res.ok){ throw new Error((data && data.detail) || 'Error al actualizar'); }
-        msg.textContent = 'Cambios guardados';
-        loadPlans();
-      }catch(err){ msg.textContent = err.message || String(err); }
-      finally{ btn.disabled = false; btn.textContent = 'Guardar'; }
-    }
-
-    async function deletePlan(id){
-      if(!confirm('¿Borrar plan ' + id + ' (se eliminarán suscripciones y pagos asociados)?')) return;
-      const res = await fetch(api('/plans/' + id), { method:'DELETE', headers: authHeaders() });
-      if(res.status === 204){ loadPlans(); return; }
-      const data = await res.json().catch(()=>({detail:'Error'}));
-      alert('No se pudo borrar: ' + (data.detail || res.status));
-    }
-
-    function updateDuracionForEdit(sel){
-      const wrap = document.getElementById('plan_edit');
-      if(!wrap) return;
-      const dur = wrap.querySelector('[name="duracion_meses"]');
-      if(!dur) return;
-      dur.value = periodoDuracion(sel.value);
-    }
-
-    async function deleteDoctor(id){
-      if(!confirm('¿Borrar médico ' + id + '?')) return;
-      const res = await fetch(api('/admin/doctors/' + id), { method:'DELETE', headers: authHeaders() });
-      if(res.status === 204){ loadDoctors(); loadMetrics(); return; }
-      const data = await res.json().catch(()=>({detail:'Error'}));
-      alert('No se pudo borrar: ' + (data.detail || res.status));
-    }
-
-
-    async function generateCodeInto(inputId){
-      const el = document.getElementById(inputId);
-      if(!el) return;
-      el.value = '';
-      const res = await fetch(api('/admin/hospitals/generate-code'), { headers: authHeaders()});
-      if(!res.ok){ const data = await res.json().catch(()=>({detail:'Error'})); alert(data.detail || 'Error generando código'); return; }
-      const data = await res.json();
-      el.value = data.codigo;
-    }
-
-    async function loadHospitals(){
-      const list = document.getElementById('hosp_list');
-      const estado = document.getElementById('hosp_estado').value;
-      const q = document.getElementById('hosp_search').value.trim();
-      list.innerHTML = '<tr><td colspan="6">Cargando...</td></tr>';
-      const params = new URLSearchParams();
-      if(estado) params.set('estado', estado);
-      if(q) params.set('q', q);
-      const res = await fetch(api('/admin/hospitals?' + params.toString()), { headers: authHeaders() });
-      if(!res.ok){ list.innerHTML = '<tr><td colspan="6">Error</td></tr>'; return; }
-      const rows = await res.json();
-      if(!rows.length){ list.innerHTML = '<tr><td colspan="6">Sin resultados</td></tr>'; return; }
-      list.innerHTML = rows.map(h=>`<tr>
-        <td>${h.id_hospital}</td>
-        <td>${h.nombre}</td>
-        <td>${h.codigo}</td>
-        <td>${h.ciudad ?? ''}</td>
-        <td>${h.estado}</td>
-        <td class="actions">
-          <button onclick="selectHospital(${h.id_hospital})">Editar</button>
-          <button class="warn" onclick="deleteHospital(${h.id_hospital})">Borrar</button>
-        </td>
-      </tr>`).join('');
-      // Keep a cache by id for quick select
-      window.__HOSP_CACHE__ = Object.fromEntries(rows.map(h=>[h.id_hospital, h]));
-    }
-
-    async function createHospital(ev){
-      ev.preventDefault();
-      const f = ev.target;
-      const payload = {
-        nombre: f.nombre.value.trim(),
-        direccion: f.direccion.value.trim() || null,
-        ciudad: f.ciudad.value.trim() || null,
-        telefono: f.telefono.value.trim() || null,
-        correo: f.correo.value.trim() || null,
-      };
-      if(f.codigo.value.trim()) payload.codigo = f.codigo.value.trim();
-      const btn = f.querySelector('button[type="submit"]');
-      const msg = document.getElementById('hosp_create_msg');
-      msg.textContent = '';
-      btn.disabled = true; btn.textContent = 'Creando...';
-      try{
-        const res = await fetch(api('/admin/hospitals'), { method:'POST', headers: { ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify(payload)});
-        const data = await res.json().catch(()=>null);
-        if(!res.ok){ throw new Error((data && data.detail) || 'Error al crear'); }
-        f.reset();
-        msg.textContent = 'Hospital creado';
-        loadHospitals(); loadMetrics();
-      }catch(err){ msg.textContent = err.message || String(err); }
-      finally{ btn.disabled = false; btn.textContent = 'Crear'; }
-    }
-
-    function selectHospital(id){
-      const h = window.__HOSP_CACHE__ ? window.__HOSP_CACHE__[id] : null;
-      if(!h){ alert('No encontrado en la lista actual'); return; }
-      currentHospitalId = id;
-      const c = document.getElementById('hosp_edit');
-      c.style.display = 'block';
-      c.querySelector('[name="nombre"]').value = h.nombre || '';
-      c.querySelector('[name="direccion"]').value = h.direccion || '';
-      c.querySelector('[name="ciudad"]').value = h.ciudad || '';
-      c.querySelector('[name="telefono"]').value = h.telefono || '';
-      c.querySelector('[name="correo"]').value = h.correo || '';
-      c.querySelector('[name="codigo"]').value = h.codigo || '';
-      c.querySelector('[name="estado"]').value = h.estado || 'ACTIVO';
-      document.getElementById('hosp_edit_msg').textContent = '';
-      c.scrollIntoView({behavior:'smooth', block:'center'});
-    }
-
-    function cancelEditHospital(){
-      currentHospitalId = null;
-      document.getElementById('hosp_edit').style.display = 'none';
-    }
-
-    async function saveHospital(ev){
-      ev.preventDefault();
-      if(!currentHospitalId) return;
-      const f = ev.target;
-      const payload = {};
-      const setIf = (k,v)=>{ if(v !== '' && v !== null && v !== undefined) payload[k]=v; };
-      setIf('nombre', f.nombre.value.trim());
-      setIf('direccion', f.direccion.value.trim());
-      setIf('ciudad', f.ciudad.value.trim());
-      setIf('telefono', f.telefono.value.trim());
-      setIf('correo', f.correo.value.trim());
-      setIf('codigo', f.codigo.value.trim());
-      setIf('estado', f.estado.value);
-      const btn = f.querySelector('button[type="submit"]');
-      const msg = document.getElementById('hosp_edit_msg');
-      msg.textContent = '';
-      btn.disabled = true; btn.textContent = 'Guardando...';
-      try{
-        const res = await fetch(api('/admin/hospitals/' + currentHospitalId), { method:'PATCH', headers: { ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify(payload)});
-        const data = await res.json().catch(()=>null);
-        if(!res.ok){ throw new Error((data && data.detail) || 'Error al actualizar'); }
-        msg.textContent = 'Cambios guardados';
-        loadHospitals(); loadMetrics();
-      }catch(err){ msg.textContent = err.message || String(err); }
-      finally{ btn.disabled = false; btn.textContent = 'Guardar'; }
-    }
-
-    async function deleteHospital(id){
-      if(!confirm('¿Borrar hospital ' + id + '?')) return;
-      const res = await fetch(api('/admin/hospitals/' + id), { method:'DELETE', headers: authHeaders() });
-      if(res.status === 204){ loadHospitals(); loadMetrics(); if(currentHospitalId===id) cancelEditHospital(); return; }
-      const data = await res.json().catch(()=>({detail:'Error'}));
-      alert('No se pudo borrar: ' + (data.detail || res.status));
-    }
-
-    async function loadInactiveUsers(){
-      const list = document.getElementById('users_inactive');
-      if(!list) return;
-      list.innerHTML = '<tr><td colspan="5">Cargando...</td></tr>';
-      const res = await fetch(api('/admin/users/inactive'), { headers: authHeaders() });
-      if(!res.ok){ list.innerHTML = '<tr><td colspan="5">Error</td></tr>'; return; }
-      const rows = await res.json();
-      window.__USERS_CACHE__ = rows;
-      if(!rows.length){ list.innerHTML = '<tr><td colspan="5">Sin usuarios inactivos</td></tr>'; return; }
-      list.innerHTML = rows.map(u=>`<tr>
-        <td>${u.id_usuario}</td>
-        <td>${u.nombre} ${u.apellido}</td>
-        <td>${u.correo}</td>
-        <td>${u.rol}</td>
-        <td class="actions"><button class="warn" onclick="deleteUser(${u.id_usuario})">Borrar</button></td>
-      </tr>`).join('');
-    }
-
-    async function deleteUser(id){
-      const cache = window.__USERS_CACHE__ || [];
-      const u = cache.find(x=>x.id_usuario===id);
-      if(!confirm('¿Borrar usuario inactivo ' + id + (u? ' ('+u.correo+')':'' ) + '?')) return;
-      const res = await fetch(api('/admin/users/' + id), { method:'DELETE', headers: authHeaders() });
-      if(res.status === 204){ loadInactiveUsers(); return; }
-      const data = await res.json().catch(()=>({detail:'Error'}));
-      alert('No se pudo borrar: ' + (data.detail || res.status));
-    }
-
-    window.addEventListener('DOMContentLoaded', async () => {
-      const ok = await ensureAdmin();
-      if(!ok) return;
-      loadMetrics();
-      loadDoctors();
-      loadHospitals();
-      loadRecentPayments();
-      loadActiveUsersSubs();
-      loadHospitalsBilling();
-      loadPlans();
-      loadInactiveUsers();
-      document.getElementById('search').addEventListener('input', () => { loadDoctors(); });
-      document.getElementById('hosp_search').addEventListener('input', () => { loadHospitals(); });
-      document.getElementById('hosp_estado').addEventListener('change', () => { loadHospitals(); });
-      document.getElementById('hosp_create_form').addEventListener('submit', createHospital);
-      document.getElementById('hosp_edit_form').addEventListener('submit', saveHospital);
-      document.getElementById('hosp_create_gen').addEventListener('click', () => generateCodeInto('hosp_create_codigo'));
-      document.getElementById('hosp_edit_gen').addEventListener('click', () => generateCodeInto('hosp_edit_codigo'));
-      const refBtn = document.getElementById('users_refresh');
-      if(refBtn){ refBtn.addEventListener('click', () => { loadInactiveUsers(); }); }
-    });
-    </script>
-</head>
-<body>
-  <header>
-    <h1>Panel Administrador</h1>
-    <div>
-      <span id="user" class="muted"></span>
-      <button onclick="logout()" style="margin-left:10px">Salir</button>
-    </div>
-  </header>
-  <main>
-    <section class="card">
-      <h2 style="margin-top:0">Métricas</h2>
-      <div id="metrics">Cargando...</div>
-    </section>
-
-    <section class="grid3">
-      <div class="card">
-        <h3 style="margin-top:0">Últimos pagos</h3>
-        <div style="overflow:auto; margin-top:8px">
-          <table>
-            <thead><tr><th>Fecha</th><th>Monto</th><th>Ref</th><th>Titular</th></tr></thead>
-            <tbody id="recent_payments"><tr><td colspan="4">Cargando...</td></tr></tbody>
-          </table>
-        </div>
+  <body class="bg-black text-gray-200 font-sans min-h-screen">
+    <!-- Header -->
+    <header class="bg-black/95 backdrop-blur-md sticky top-0 z-10 flex justify-between items-center px-6 py-4 border-b border-gray-800">
+      <div class="flex items-center gap-3">
+        <img src="/static/admin/assets/logo.webp" alt="Logo 3DVinci Health" class="h-8 w-auto" />
+        <h1 class="text-2xl font-extrabold text-cyan-400">SOM3D</h1>
       </div>
-      <div class="card">
-        <h3 style="margin-top:0">Usuarios activos y suscripciones</h3>
-        <div style="overflow:auto; margin-top:8px">
-          <table>
-            <thead><tr><th>Usuario</th><th>Correo</th><th>Hospital</th><th>Plan</th><th>Periodo</th><th>Expira</th></tr></thead>
-            <tbody id="active_users_subs"><tr><td colspan="6">Cargando...</td></tr></tbody>
-          </table>
-        </div>
-      </div>
-      <div class="card">
-        <h3 style="margin-top:0">Hospitales: pagos y suscripciones</h3>
-        <div style="overflow:auto; margin-top:8px">
-          <table>
-            <thead><tr><th>Hospital</th><th>Suscripciones</th><th>Pagos</th><th>Monto</th><th>Último pago</th></tr></thead>
-            <tbody id="hosp_billing"><tr><td colspan="5">Cargando...</td></tr></tbody>
-          </table>
-        </div>
-      </div>
-    </section>
+    </header>
 
-    <section class="card">
-      <h3 style="margin-top:0">Doctores</h3>
-      <input id="search" placeholder="Buscar por nombre/correo" />
-      <div style="overflow:auto; margin-top:8px">
-        <table>
-          <thead><tr><th>ID</th><th>Nombre</th><th>Correo</th><th>Hospital</th><th>Estado</th><th></th></tr></thead>
-          <tbody id="doctors_list"><tr><td colspan="6">Cargando...</td></tr></tbody>
-        </table>
-      </div>
-      <div class="muted" style="margin-top:8px">Los médicos se registran y pagan directamente. Aquí solo se listan, filtran y pueden ser eliminados si no tienen dependencias.</div>
-    </section>
-
-    <section class="card">
-      <h3 style="margin-top:0">Hospitales</h3>
-      <div class="grid2">
-        <div>
-          <div class="row">
-            <input id="hosp_search" placeholder="Buscar por nombre/ciudad/código" />
-            <select id="hosp_estado">
-              <option value="">Todos</option>
-              <option value="ACTIVO">Activos</option>
-              <option value="INACTIVO">Inactivos</option>
-            </select>
+    <main class="p-6 max-w-4xl mx-auto">
+      <!-- Crear Job -->
+      <section class="rounded-2xl p-6 border border-cyan-900/30 bg-gray-900">
+        <header class="flex items-center gap-3 mb-6">
+          <div class="w-10 h-10 rounded-xl bg-cyan-500/15 grid place-items-center">
+            <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6 text-cyan-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-width="1.6" d="M3 7h18M6 12h12M9 17h6" />
+            </svg>
           </div>
-          <div style="overflow:auto; margin-top:8px">
-            <table>
-              <thead><tr><th>ID</th><th>Nombre</th><th>Código</th><th>Ciudad</th><th>Estado</th><th></th></tr></thead>
-              <tbody id="hosp_list"><tr><td colspan="6">Cargando...</td></tr></tbody>
-            </table>
+          <div>
+            <h2 class="text-xl font-extrabold tracking-tight">Crear Job SOM3D</h2>
+            <p class="text-xs text-gray-400 -mt-1">Sube un .zip con DICOMs y configura las opciones</p>
           </div>
-        </div>
-        <div>
-          <h4 style="margin:8px 0">Crear hospital</h4>
-          <form id="hosp_create_form">
-            <label>Nombre <input name="nombre" required /></label>
-            <label>Dirección <input name="direccion" /></label>
-            <label>Ciudad <input name="ciudad" /></label>
-            <label>Teléfono <input name="telefono" /></label>
-            <label>Correo <input name="correo" type="email" /></label>
-            <div class="row">
-              <label>Código (opcional)
-                <div class="actions" style="gap:8px">
-                  <input id="hosp_create_codigo" name="codigo" />
-                  <button type="button" id="hosp_create_gen">Generar</button>
-                </div>
-              </label>
-            </div>
-            <div class="actions" style="margin-top:8px">
-              <button type="submit">Crear</button>
-              <span id="hosp_create_msg" class="err"></span>
-            </div>
-          </form>
+        </header>
 
-          <div id="hosp_edit" style="display:none; margin-top:20px">
-            <h4 style="margin:8px 0">Editar hospital</h4>
-            <form id="hosp_edit_form">
-              <label>Nombre <input name="nombre" required /></label>
-              <label>Dirección <input name="direccion" /></label>
-              <label>Ciudad <input name="ciudad" /></label>
-              <label>Teléfono <input name="telefono" /></label>
-              <label>Correo <input name="correo" type="email" /></label>
-              <label>Estado
-                <select name="estado">
-                  <option value="ACTIVO">ACTIVO</option>
-                  <option value="INACTIVO">INACTIVO</option>
-                </select>
-              </label>
-              <label>Código
-                <div class="actions" style="gap:8px">
-                  <input id="hosp_edit_codigo" name="codigo" />
-                  <button type="button" id="hosp_edit_gen">Generar</button>
-                </div>
-              </label>
-              <div class="actions" style="margin-top:8px; gap:8px">
-                <button type="submit">Guardar</button>
-                <button type="button" class="warn" onclick="cancelEditHospital()">Cancelar</button>
-                <span id="hosp_edit_msg" class="err"></span>
+        <form id="som_form" class="grid gap-6">
+          <!-- Subida drag & drop -->
+          <div>
+            <label class="block text-sm mb-1">Archivo (.zip con DICOMs)</label>
+            <input id="file_input" name="file" type="file" accept=".zip" class="hidden" />
+            <div id="drop_zone"
+                 class="group relative rounded-2xl border-2 border-dashed border-cyan-700/60 bg-black/40 hover:bg-black/50 transition-colors cursor-pointer p-6 flex flex-col items-center text-center">
+              <div class="rounded-xl bg-cyan-500/10 p-3 mb-3">
+                <svg xmlns="http://www.w3.org/2000/svg" class="w-8 h-8 text-cyan-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-width="1.5" d="M3 15a4 4 0 004 4h10a4 4 0 004-4M7 15V7a5 5 0 0110 0v8M12 12v6" />
+                </svg>
               </div>
-            </form>
-          </div>
-        </div>
-      </div>
-    </section>
+              <p class="text-sm">
+                <span class="font-semibold text-cyan-300">Arrastra y suelta</span> tu .zip aquí
+                o <span class="underline decoration-dotted">haz clic para seleccionar</span>
+              </p>
+              <p class="text-xs text-gray-400 mt-1">Solo archivos .zip — recomendado &lt; 10 GB</p>
 
-    <section class="card">
-      <h3 style="margin-top:0">Planes</h3>
-      <div class="grid2p">
-        <div>
-          <div style="overflow:auto; margin-top:8px">
-            <table>
-              <thead><tr><th>ID</th><th>Nombre</th><th>Precio</th><th>Periodo</th><th>Duración</th><th></th></tr></thead>
-              <tbody id="plans_list"><tr><td colspan="6">Cargando...</td></tr></tbody>
-            </table>
+              <div id="file_state" class="hidden mt-4 w-full max-w-md text-left">
+                <div class="flex items-center justify-between gap-3 rounded-xl border border-gray-700 bg-gray-800/60 px-3 py-2">
+                  <div class="min-w-0">
+                    <p id="file_name" class="truncate text-sm font-medium"></p>
+                    <p id="file_size" class="text-xs text-gray-400"></p>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <div id="upload_progress_wrap" class="hidden w-40">
+                      <div class="h-2 w-full bg-gray-700 rounded">
+                        <div id="upload_progress_bar" class="h-2 bg-cyan-500 rounded" style="width:0%"></div>
+                      </div>
+                      <p id="upload_progress_text" class="text-[11px] text-gray-400 mt-1 text-right">0%</p>
+                    </div>
+                    <button type="button" id="change_file_btn" class="px-2.5 py-1 rounded bg-gray-700 hover:bg-gray-600 text-xs">Cambiar</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <p id="file_msg" class="text-xs mt-2 text-gray-400"></p>
           </div>
-        </div>
-        <div>
-          <h4 style="margin:8px 0">Crear plan</h4>
-          <form id="plan_create_form" onsubmit="createPlan(event)">
-            <label>Nombre <input name="nombre" required /></label>
-            <label>Precio <input name="precio" type="number" step="0.01" min="0.01" required /></label>
-            <label>Periodo
-              <select name="periodo">
-                <option value="MENSUAL">MENSUAL</option>
-                <option value="TRIMESTRAL">TRIMESTRAL</option>
-                <option value="ANUAL">ANUAL</option>
+
+          <!-- Tareas con SWITCH que se mueve -->
+          <div>
+            <label class="block text-sm mb-2">Tareas de segmentación</label>
+
+            <div class="grid sm:grid-cols-2 gap-3">
+              <!-- Cada tarjeta: input.sw-input (hidden) + span.sw (pista y knob) -->
+              <!-- Ortopedia -->
+              <label class="flex items-start gap-3 rounded-2xl border border-gray-700 bg-black/30 hover:bg-black/40 px-4 py-3 cursor-pointer transition-colors">
+                <input id="enable_ortopedia" name="enable_ortopedia" type="checkbox" class="sw-input sr-only" checked />
+                <span class="sw"></span>
+                <span class="block">
+                  <span class="font-semibold">Ortopedia</span>
+                  <span class="block text-xs text-gray-400 -mt-0.5">Huesos axiales y apendiculares (ortopedia general).</span>
+                </span>
+              </label>
+
+              <!-- Apendicular -->
+              <label class="flex items-start gap-3 rounded-2xl border border-gray-700 bg-black/30 hover:bg-black/40 px-4 py-3 cursor-pointer transition-colors">
+                <input id="enable_appendicular" name="enable_appendicular" type="checkbox" class="sw-input sr-only" />
+                <span class="sw"></span>
+                <span class="block">
+                  <span class="font-semibold">Apendicular</span>
+                  <span class="block text-xs text-gray-400 -mt-0.5">Extremidades superiores e inferiores.</span>
+                </span>
+              </label>
+
+              <!-- Músculos -->
+              <label class="flex items-start gap-3 rounded-2xl border border-gray-700 bg-black/30 hover:bg-black/40 px-4 py-3 cursor-pointer transition-colors">
+                <input id="enable_muscles" name="enable_muscles" type="checkbox" class="sw-input sr-only" />
+                <span class="sw"></span>
+                <span class="block">
+                  <span class="font-semibold">Músculos</span>
+                  <span class="block text-xs text-gray-400 -mt-0.5">Grupos musculares principales (musculoesquelético).</span>
+                </span>
+              </label>
+
+              <!-- Implante de cadera -->
+              <label class="flex items-start gap-3 rounded-2xl border border-gray-700 bg-black/30 hover:bg-black/40 px-4 py-3 cursor-pointer transition-colors">
+                <input id="enable_hip_implant" name="enable_hip_implant" type="checkbox" class="sw-input sr-only" />
+                <span class="sw"></span>
+                <span class="block">
+                  <span class="font-semibold">Implante de cadera</span>
+                  <span class="block text-xs text-gray-400 -mt-0.5">Detección/segmentación de prótesis de cadera.</span>
+                </span>
+              </label>
+
+              <!-- Dentición -->
+              <label class="flex items-start gap-3 rounded-2xl border border-gray-700 bg-black/30 hover:bg-black/40 px-4 py-3 cursor-pointer transition-colors">
+                <input id="teeth" name="teeth" type="checkbox" class="sw-input sr-only" />
+                <span class="sw"></span>
+                <span class="block">
+                  <span class="font-semibold">Dentición</span>
+                  <span class="block text-xs text-gray-400 -mt-0.5">Estructuras dentales para odontología.</span>
+                </span>
+              </label>
+
+              <!-- Craneofacial -->
+              <label class="flex items-start gap-3 rounded-2xl border border-gray-700 bg-black/30 hover:bg-black/40 px-4 py-3 cursor-pointer transition-colors">
+                <input id="cranio" name="cranio" type="checkbox" class="sw-input sr-only" />
+                <span class="sw"></span>
+                <span class="block">
+                  <span class="font-semibold">Craneofacial</span>
+                  <span class="block text-xs text-gray-400 -mt-0.5">Cráneo, cara y estructuras asociadas.</span>
+                </span>
+              </label>
+            </div>
+          </div>
+
+          <!-- Paciente -->
+          <div>
+            <label class="block text-sm mb-1">Paciente (obligatorio)</label>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 items-start">
+              <select id="som_id_paciente" name="id_paciente" required
+                      class="w-full px-3 py-2 rounded bg-black/40 border border-gray-700 col-span-1 sm:col-span-2">
+                <option value="">-- Selecciona resultado de búsqueda --</option>
               </select>
-            </label>
-            <div class="actions" style="margin-top:8px">
-              <button type="submit">Crear</button>
-              <span id="plan_create_msg" class="err"></span>
-            </div>
-          </form>
 
-          <div id="plan_edit" style="display:none; margin-top:20px">
-            <h4 style="margin:8px 0">Editar plan</h4>
-            <form id="plan_edit_form" onsubmit="savePlan(event)">
-              <label>Nombre <input name="nombre" required /></label>
-              <label>Precio <input name="precio" type="number" step="0.01" min="0.01" required /></label>
-              <label>Periodo
-                <select name="periodo" oninput="updateDuracionForEdit(this)">
-                  <option value="MENSUAL">MENSUAL</option>
-                  <option value="TRIMESTRAL">TRIMESTRAL</option>
-                  <option value="ANUAL">ANUAL</option>
-                </select>
-              </label>
-              <label>Duración (meses)
-                <input name="duracion_meses" disabled />
-              </label>
-              <div class="actions" style="margin-top:8px; gap:8px">
-                <button type="submit">Guardar</button>
-                <button type="button" class="warn" onclick="cancelEditPlan()">Cancelar</button>
-                <span id="plan_edit_msg" class="err"></span>
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-2 sm:col-span-3">
+                <input id="search_cedula" placeholder="Buscar por cédula"
+                       class="w-full px-3 py-2 rounded bg-black/40 border border-gray-700 col-span-2" />
+                <button type="button" id="btn_search_cedula" class="px-4 py-2 rounded bg-cyan-700 hover:bg-cyan-600">Buscar</button>
               </div>
-            </form>
+
+              <p id="search_msg" class="text-xs text-gray-400 mt-1 sm:col-span-3"></p>
+            </div>
+          </div>
+
+          <div class="flex items-center gap-3">
+            <button id="submit_btn" type="submit" class="px-5 py-2 rounded bg-cyan-600 hover:bg-cyan-500 font-semibold">Crear Job</button>
+            <span id="som_msg" class="text-sm"></span>
+          </div>
+        </form>
+      </section>
+
+      <!-- Jobs SOM3D -->
+      <section class="rounded-2xl p-6 border border-cyan-900/30 bg-gray-900 mt-6">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-xl font-extrabold tracking-tight">Jobs SOM3D</h2>
+          <div class="flex items-center gap-2">
+            <button id="jobs_refresh" class="px-3 py-1.5 rounded bg-cyan-700 hover:bg-cyan-600 text-sm">Actualizar</button>
+            <span id="jobs_msg" class="text-xs text-gray-400"></span>
           </div>
         </div>
-      </div>
-    </section>
 
-    <section class="card">
-      <h3 style="margin-top:0">Usuarios inactivos</h3>
-      <div class="actions">
-        <button id="users_refresh">Actualizar</button>
-        <span class="muted">Solo se pueden borrar usuarios con activo=false. Usuarios ADMIN no se pueden borrar.</span>
-      </div>
-      <div style="overflow:auto; margin-top:8px">
-        <table>
-          <thead><tr><th>ID</th><th>Nombre</th><th>Correo</th><th>Rol</th><th></th></tr></thead>
-          <tbody id="users_inactive"><tr><td colspan="5">Cargando...</td></tr></tbody>
-        </table>
-      </div>
-    </section>
-  </main>
-</body>
+        <div class="overflow-auto">
+          <table class="w-full text-sm">
+            <thead class="text-left text-gray-400 border-b border-gray-700">
+              <tr>
+                <th class="py-2 pr-3">Job ID</th>
+                <th class="py-2 pr-3">Estado</th>
+                <th class="py-2 pr-3">Fase</th>
+                <th class="py-2 pr-3">Progreso</th>
+                <th class="py-2 pr-3">Acciones</th>
+              </tr>
+            </thead>
+            <tbody id="jobs_list"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Panel de logs -->
+      <section id="logs_panel" class="rounded-2xl p-4 border border-cyan-900/30 bg-gray-900 mt-4 hidden">
+        <div class="flex items-center justify-between">
+          <div>
+            <h3 id="logs_title" class="font-semibold text-cyan-300">Logs</h3>
+            <p id="logs_meta" class="text-xs text-gray-400"></p>
+          </div>
+          <div class="flex items-center gap-2">
+            <button id="logs_update" class="px-3 py-1.5 rounded bg-cyan-700 hover:bg-cyan-600 text-sm">Actualizar</button>
+            <label class="text-xs flex items-center gap-1">
+              <input id="logs_auto" type="checkbox" class="accent-cyan-500" /> Auto (25s)
+            </label>
+            <button id="logs_close" class="px-2.5 py-1.5 rounded bg-gray-700 hover:bg-gray-600 text-sm" aria-label="Ocultar logs">
+              Ocultar
+            </button>
+          </div>
+        </div>
+        <div class="mt-3">
+          <pre id="logs_pre" class="text-xs leading-relaxed whitespace-pre-wrap bg-black/70 border border-gray-800 rounded p-3 max-h-[50vh] overflow-auto"></pre>
+        </div>
+      </section>
+    </main>
+
+    <!-- Lógica separada -->
+    <script src="./som3d.js" defer></script>
+  </body>
 </html>
-
-
-

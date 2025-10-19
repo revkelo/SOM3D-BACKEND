@@ -1,8 +1,9 @@
 from fastapi import FastAPI
 import os
+
+from dotenv import load_dotenv, find_dotenv
 from starlette.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from dotenv import load_dotenv, find_dotenv
 
 from .routes.auth import router as auth_router
 from .routes.plans import router as plans_router
@@ -16,6 +17,7 @@ from .routes.som3d import router as som3d_router
 from .routes.patients import router as patients_router
 from .routes.studies import router as studies_router
 from .routes.visor import router as visor_router
+from .routes.messages import router as mensajes_router
 from .routes.hospitals import router as hospitals_router
 
 # Cargar variables de entorno desde .env si existe
@@ -54,6 +56,7 @@ app.include_router(doctors_router)   # /admin/doctors
 app.include_router(admin_router)     # /admin/metrics
 app.include_router(admin_hospitals_router)  # /admin/hospitals
 app.include_router(admin_users_router)      # /admin/users
+app.include_router(mensajes_router)
 
 # Static files (admin dashboard)
 static_dir = os.path.join(os.path.dirname(__file__), "static")

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, Request
 from pydantic import EmailStr
 from sqlalchemy.orm import Session
 
@@ -16,6 +16,12 @@ from ..schemas import (
 )
 from ..services.mailer import send_email
 from ..core.config import BASE_URL, FRONTEND_BASE_URL, VERIFY_EMAIL_EXPIRE_MIN, RESET_PASS_EXPIRE_MIN
+from ..core.config import (
+    REFRESH_TOKEN_EXPIRE_MINUTES,
+    REFRESH_COOKIE_NAME,
+    REFRESH_COOKIE_SAMESITE,
+    REFRESH_COOKIE_SECURE,
+)
 from ..core.tokens import (
     make_pre_register_token,
     parse_pre_register_token,
@@ -26,6 +32,7 @@ from ..core.tokens import (
     parse_reset_code_token,
     _fp_password,
 )
+from ..core.tokens import make_refresh_token, parse_refresh_token
 from ..core.security import hash_password, verify_password, create_access_token, get_current_user
 from fastapi.responses import HTMLResponse
 
@@ -34,14 +41,28 @@ router = APIRouter()
 
 
 @router.post("/login", response_model=TokenOut)
-def login(payload: LoginIn, db: Session = Depends(get_db)):
+def login(payload: LoginIn, response: Response, db: Session = Depends(get_db)):
     user = db.query(Usuario).filter(Usuario.correo == payload.correo).first()
     if not user or not verify_password(payload.password, user.contrasena):
         raise HTTPException(status_code=401, detail="Credenciales inválidas")
     # Permitimos login aunque esté inactivo para completar el pago
 
-    token = create_access_token({"sub": str(user.id_usuario), "rol": user.rol, "email": user.correo})
-    return {"access_token": token, "token_type": "bearer"}
+    access = create_access_token({"sub": str(user.id_usuario), "rol": user.rol, "email": user.correo})
+    # Set cookie de refresh
+    same = (REFRESH_COOKIE_SAMESITE or "lax").lower()
+    if same not in ("lax", "strict", "none"):
+        same = "lax"
+    refresh = make_refresh_token(user.id_usuario, user.contrasena, REFRESH_TOKEN_EXPIRE_MINUTES)
+    response.set_cookie(
+        key=REFRESH_COOKIE_NAME,
+        value=refresh,
+        httponly=True,
+        secure=bool(REFRESH_COOKIE_SECURE),
+        samesite=same,
+        max_age=REFRESH_TOKEN_EXPIRE_MINUTES * 60,
+        path="/auth",
+    )
+    return {"access_token": access, "token_type": "bearer"}
 
 
 @router.get("/me", response_model=UserOut)
@@ -259,3 +280,53 @@ def reset_password_form(token: str = Query(...)):
     html = template.replace('__TOKEN__', token)
     return HTMLResponse(html)
 
+
+# -----------------------
+# Refresh & Logout (cookies HttpOnly)
+# -----------------------
+
+def _set_refresh_cookie(response: Response, token: str):
+    same = (REFRESH_COOKIE_SAMESITE or "lax").lower()
+    if same not in ("lax", "strict", "none"):
+        same = "lax"
+    response.set_cookie(
+        key=REFRESH_COOKIE_NAME,
+        value=token,
+        httponly=True,
+        secure=bool(REFRESH_COOKIE_SECURE),
+        samesite=same,
+        max_age=REFRESH_TOKEN_EXPIRE_MINUTES * 60,
+        path="/auth",
+    )
+
+
+def _clear_refresh_cookie(response: Response):
+    response.delete_cookie(REFRESH_COOKIE_NAME, path="/auth")
+
+
+@router.post("/refresh", response_model=TokenOut)
+def refresh_token(request: Request, response: Response, db: Session = Depends(get_db)):
+    cookie = request.cookies.get(REFRESH_COOKIE_NAME)
+    if not cookie:
+        raise HTTPException(status_code=401, detail="No refresh token")
+    payload = parse_refresh_token(cookie)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Refresh invalido o expirado")
+    user_id = int(payload.get("sub") or 0)
+    user = db.query(Usuario).filter(Usuario.id_usuario == user_id).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="Usuario no encontrado")
+    if not token_fp_matches(payload, user.contrasena):
+        _clear_refresh_cookie(response)
+        raise HTTPException(status_code=401, detail="Refresh invalido")
+
+    access = create_access_token({"sub": str(user.id_usuario), "rol": user.rol, "email": user.correo})
+    new_refresh = make_refresh_token(user.id_usuario, user.contrasena, REFRESH_TOKEN_EXPIRE_MINUTES)
+    _set_refresh_cookie(response, new_refresh)
+    return {"access_token": access, "token_type": "bearer"}
+
+
+@router.post("/logout")
+def logout(response: Response):
+    _clear_refresh_cookie(response)
+    return {"ok": True}

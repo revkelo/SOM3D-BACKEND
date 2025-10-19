@@ -454,8 +454,11 @@ async def create_job(
     return JSONResponse(content=manifest.to_dict(), status_code=201)
 
 
+from ..core.security import require_admin
+
+
 @router.get("/jobs")
-async def list_jobs():
+async def list_jobs(user = Depends(require_admin)):
     s3 = _ensure_s3()
     try:
         keys = s3.list(DEFAULT_PREFIX)
@@ -499,7 +502,7 @@ async def list_my_jobs(db: Session = Depends(get_db), user = Depends(get_current
 
 
 @router.get("/jobs/{job_id}")
-async def get_job(job_id: str):
+async def get_job(job_id: str, user = Depends(get_current_user)):
     m = _load_manifest(job_id)
     if not m:
         raise HTTPException(status_code=404, detail="Job no encontrado")
@@ -507,7 +510,7 @@ async def get_job(job_id: str):
 
 
 @router.get("/jobs/{job_id}/progress")
-async def get_progress(job_id: str):
+async def get_progress(job_id: str, user = Depends(get_current_user)):
     m = _load_manifest(job_id)
     if not m:
         raise HTTPException(status_code=404, detail="Job no encontrado")
@@ -515,7 +518,7 @@ async def get_progress(job_id: str):
 
 
 @router.get("/jobs/{job_id}/log")
-async def get_log(job_id: str, tail: int = 200):
+async def get_log(job_id: str, tail: int = 200, user = Depends(get_current_user)):
     # Ya no se guarda logs/job.log en S3; usar manifest.log_tail
     s3 = _ensure_s3()
     log_key = _s3_key(job_id, LOG_KEY)
@@ -562,7 +565,7 @@ async def get_log(job_id: str, tail: int = 200):
 
 
 @router.get("/jobs/{job_id}/stls")
-async def get_stls(job_id: str):
+async def get_stls(job_id: str, user = Depends(get_current_user)):
     s3 = _ensure_s3()
     base1 = s3.join_key(s3.cfg.prefix or "", job_id)
     base2 = s3.join_key(base1, RESULT_SUBDIR)
@@ -595,7 +598,7 @@ async def get_stls(job_id: str):
 
 
 @router.get("/jobs/{job_id}/result")
-async def get_result(job_id: str, expires: int = 3600):
+async def get_result(job_id: str, expires: int = 3600, user = Depends(get_current_user)):
     s3 = _ensure_s3()
     m = _load_manifest(job_id)
     if not m:
@@ -646,7 +649,7 @@ async def finalize_job(job_id: str, payload: FinalizeJobIn, db: Session = Depend
 
 
 @router.delete("/jobs/{job_id}")
-async def cancel_job(job_id: str):
+async def cancel_job(job_id: str, user = Depends(require_admin)):
     import psutil
     s3 = _ensure_s3()
     m = _load_manifest(job_id)

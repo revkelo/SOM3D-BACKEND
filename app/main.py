@@ -26,11 +26,14 @@ try:
 except Exception:
     pass
 
+from .core.config import FRONTEND_ORIGINS
+
 app = FastAPI(title="SOM3D Backend", version="1.0.0")
 
+_cors_origins = FRONTEND_ORIGINS if FRONTEND_ORIGINS else ["*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

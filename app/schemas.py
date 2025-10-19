@@ -51,6 +51,8 @@ class HospitalIn(BaseModel):
     telefono: Optional[str] = Field(default=None, max_length=30)
     correo: Optional[EmailStr] = None
     codigo: Optional[str] = Field(default=None, min_length=1, max_length=12)
+    # Opcional: al crear el hospital, asociarlo a un plan creando una Suscripcion en PAUSADA
+    plan_id: Optional[int] = None
 
 class HospitalUpdateIn(BaseModel):
     nombre: Optional[str] = Field(default=None, max_length=150)
@@ -73,6 +75,15 @@ class HospitalOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class HospitalLinkByCodeIn(BaseModel):
+    codigo: str = Field(min_length=1, max_length=12)
+
+
+class HospitalStartSubscriptionIn(BaseModel):
+    codigo: str = Field(min_length=1, max_length=12)
+    plan_id: Optional[int] = None
 
 
 # --------------------
@@ -260,6 +271,68 @@ class JobSTLOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# --------------------
+# Doctor
+# --------------------
+class DoctorIn(BaseModel):
+    nombre: str = Field(min_length=1, max_length=100)
+    apellido: str = Field(min_length=1, max_length=100)
+    correo: EmailStr
+    password: str = Field(min_length=6, max_length=128)
+    telefono: Optional[str] = Field(default=None, max_length=20)
+    direccion: Optional[str] = Field(default=None, max_length=255)
+    ciudad: Optional[str] = Field(default=None, max_length=100)
+    id_hospital: Optional[int] = None
+    referenciado: Optional[bool] = False
+    activo: Optional[bool] = True
+
+
+class DoctorUpdateIn(BaseModel):
+    nombre: Optional[str] = Field(default=None, max_length=100)
+    apellido: Optional[str] = Field(default=None, max_length=100)
+    correo: Optional[EmailStr] = None
+    password: Optional[str] = Field(default=None, min_length=6, max_length=128)
+    telefono: Optional[str] = Field(default=None, max_length=20)
+    direccion: Optional[str] = Field(default=None, max_length=255)
+    ciudad: Optional[str] = Field(default=None, max_length=100)
+    id_hospital: Optional[int] = None
+    referenciado: Optional[bool] = None
+    activo: Optional[bool] = None
+    estado: Optional[Literal["ACTIVO","INACTIVO"]] = None
+
+
+class DoctorOut(BaseModel):
+    id_medico: int
+    id_usuario: int
+    nombre: str
+    apellido: str
+    correo: EmailStr
+    telefono: Optional[str]
+    direccion: Optional[str]
+    ciudad: Optional[str]
+    id_hospital: Optional[int]
+    referenciado: bool
+    estado: Literal["ACTIVO","INACTIVO"]
+    activo: bool
+
+    class Config:
+        from_attributes = True
+
+
+# --------------------
+# Som3D: Pacientes con STL
+# --------------------
+class PatientJobSTLOut(BaseModel):
+    id_jobstl: int
+    job_id: str
+    id_paciente: int
+    nombres: Optional[str] = None
+    apellidos: Optional[str] = None
+    doc_numero: Optional[str] = None
+    created_at: Optional[str] = None
+
 
 
 # --------------------

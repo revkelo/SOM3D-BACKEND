@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 import json
 
 from fastapi import APIRouter, File, Form, UploadFile, HTTPException, Depends
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from app.services.s3_manager import S3Manager, S3Config
 from app.services.som3d.totalsegmentator import TotalSegmentatorRunner
@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 from ..db import get_db
 from ..core.security import get_current_user, get_current_user_optional
 from ..models import JobConv, JobSTL, Paciente, Medico
-from ..schemas import FinalizeJobIn, JobSTLOut
+from ..schemas import FinalizeJobIn, JobSTLOut, PatientJobSTLOut
 from ..core.config import mysql_url
 
 
@@ -40,6 +40,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
 S3: Optional[S3Manager] = None
 DEFAULT_PREFIX = os.getenv("S3_PREFIX", "jobs/")
 RESULT_SUBDIR = "stls"
+# Mantener constante por compatibilidad, pero no se subirá el log a S3
 LOG_KEY = "logs/job.log"
 MANIFEST_KEY = "manifest.json"
 INPUT_ZIP = "input.zip"
@@ -141,25 +142,22 @@ def _save_manifest(m: JobManifest) -> None:
 
 
 def _append_log(job_id: str, line: str, manifest: Optional[JobManifest] = None):
-    s3 = _ensure_s3()
-    log_key = _s3_key(job_id, LOG_KEY)
-    try:
-        existing = s3.download_bytes(log_key)
-    except Exception:
-        existing = b""
-    new = existing + (line.rstrip() + "\n").encode("utf-8")
-    s3.upload_bytes(new, log_key)
-    if manifest:
-        tail = (manifest.log_tail or [])
-        tail.append(line.rstrip())
-        if len(tail) > 200:
-            tail = tail[-200:]
-        manifest.log_tail = tail
-        manifest.updated_at = _now_ts()
-        _save_manifest(manifest)
+    """Agrega una línea de log solo al manifiesto en S3.
+    Ya no se persiste logs/job.log como objeto independiente.
+    """
+    m = manifest or _load_manifest(job_id)
+    if not m:
+        return
+    tail = (m.log_tail or [])
+    tail.append(line.rstrip())
+    if len(tail) > 200:
+        tail = tail[-200:]
+    m.log_tail = tail
+    m.updated_at = _now_ts()
+    _save_manifest(m)
 
 
-def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], db_url: Optional[str] = None):
+def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], db_url: Optional[str] = None, local_input_zip: Optional[str] = None):
     from pathlib import Path
     import tempfile
     from sqlalchemy import create_engine, text as _sql_text
@@ -185,12 +183,7 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
     def wlog(msg: str):
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
         line = f"[{ts}] {msg}"
-        log_key = s3_key(LOG_KEY)
-        try:
-            existing = s3.download_bytes(log_key)
-        except Exception:
-            existing = b""
-        s3.upload_bytes(existing + (line + "\n").encode("utf-8"), log_key)
+        # Solo actualizar el manifiesto; no subir logs/job.log a S3
         try:
             key = s3_key(MANIFEST_KEY)
             try:
@@ -243,16 +236,33 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
             ts_out.mkdir(parents=True, exist_ok=True)
             stl_out.mkdir(parents=True, exist_ok=True)
 
-            input_key = s3_key(INPUT_ZIP)
             input_zip = tdir / "input.zip"
-            input_zip.write_bytes(s3.download_bytes(input_key))
-            wlog("ZIP de entrada listo.")
+            # Preferir ZIP local pasado desde el proceso padre; fallback a S3 si no existe
+            if local_input_zip and Path(local_input_zip).exists():
+                shutil.copy2(local_input_zip, input_zip)
+                # Intentar limpiar el ZIP local original
+                try:
+                    src = Path(local_input_zip)
+                    base = src.parent
+                    src.unlink(missing_ok=True)
+                    try:
+                        # borra el directorio padre temporal si queda vacío
+                        base.rmdir()
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                wlog("ZIP de entrada copiado desde temporal local.")
+            else:
+                input_key = s3_key(INPUT_ZIP)
+                input_zip.write_bytes(s3.download_bytes(input_key))
+                wlog("ZIP de entrada descargado desde S3.")
 
             try:
                 wlog("Iniciando TotalSegmentator ...")
                 runner = TotalSegmentatorRunner(
                     robust_import=True,
-                    enable_ortopedia=bool(params.get("enable_ortopedia", True)),
+                    enable_ortopedia=bool(params.get("enable_ortopedia", False)),
                     enable_appendicular=bool(params.get("enable_appendicular", False)),
                     enable_muscles=bool(params.get("enable_muscles", False)),
                     enable_hip_implant=bool(params.get("enable_hip_implant", False)),
@@ -278,15 +288,23 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
                 return
 
             try:
-                zip_bytes = _zip_dir_to_bytes(stl_out)
+                hq_dir = stl_out / "hq_suavizado_decimado"
+                target = hq_dir if (hq_dir.exists() and any(hq_dir.rglob('*.stl'))) else stl_out
+                zip_bytes = _zip_dir_to_bytes(target)
                 s3.upload_bytes(zip_bytes, s3_key(RESULT_ZIP), content_type="application/zip")
                 wlog("ZIP subido a S3.")
             except Exception as e:
                 save_worker_error("zip_upload", e)
                 return
 
-            keys = s3.list(s3_key(RESULT_SUBDIR)) or []
-            stl_count = int(len([k for k in keys if k.lower().endswith('.stl')]))
+            # Ya no subimos STL individuales; calcular cuenta localmente
+            keys = []
+            try:
+                hq_dir = stl_out / "hq_suavizado_decimado"
+                base = hq_dir if hq_dir.exists() else stl_out
+                stl_count = int(len([p for p in base.rglob('*.stl')]))
+            except Exception:
+                stl_count = 0
             stl_zip_size = int(len(zip_bytes or b""))
             write_manifest_patch({
                 "status": "done",
@@ -327,7 +345,7 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
 @router.post("/jobs")
 async def create_job(
     file: UploadFile = File(..., description=".zip con DICOMs"),
-    enable_ortopedia: bool = Form(True),
+    enable_ortopedia: bool = Form(False),
     enable_appendicular: bool = Form(False),
     enable_muscles: bool = Form(False),
     enable_hip_implant: bool = Form(False),
@@ -347,21 +365,14 @@ async def create_job(
     job_id = uuid.uuid4().hex
     s3_prefix = _s3_job_base(job_id)
 
-    input_key = _s3_key(job_id, INPUT_ZIP)
-    tmp = Path(tempfile.mkdtemp(prefix=f"upload_{job_id}_")) / file.filename
-    try:
-        with tmp.open("wb") as f:
-            while True:
-                chunk = await file.read(2 * 1024 * 1024)
-                if not chunk:
-                    break
-                f.write(chunk)
-        s3.upload_file(str(tmp), input_key)
-    finally:
-        try:
-            shutil.rmtree(tmp.parent, ignore_errors=True)
-        except Exception:
-            pass
+    # Guardar ZIP en temporal local y NO subir a S3
+    local_tmp = Path(tempfile.mkdtemp(prefix=f"upload_{job_id}_")) / file.filename
+    with local_tmp.open("wb") as f:
+        while True:
+            chunk = await file.read(2 * 1024 * 1024)
+            if not chunk:
+                break
+            f.write(chunk)
 
     extra_list: List[str] = []
     if extra_tasks:
@@ -412,7 +423,8 @@ async def create_job(
         db_url = mysql_url()
     except Exception:
         db_url = None
-    proc = Process(target=_worker_entry, args=(job_id, s3_cfg, manifest.params, db_url), daemon=True)
+    # Pasar al worker la ruta local del ZIP para evitar subir input.zip a S3
+    proc = Process(target=_worker_entry, args=(job_id, s3_cfg, manifest.params, db_url, str(local_tmp)), daemon=True)
     proc.start()
     _append_log(job_id, f"PID worker: {proc.pid}")
 
@@ -442,8 +454,11 @@ async def create_job(
     return JSONResponse(content=manifest.to_dict(), status_code=201)
 
 
+from ..core.security import require_admin
+
+
 @router.get("/jobs")
-async def list_jobs():
+async def list_jobs(user = Depends(require_admin)):
     s3 = _ensure_s3()
     try:
         keys = s3.list(DEFAULT_PREFIX)
@@ -487,7 +502,7 @@ async def list_my_jobs(db: Session = Depends(get_db), user = Depends(get_current
 
 
 @router.get("/jobs/{job_id}")
-async def get_job(job_id: str):
+async def get_job(job_id: str, user = Depends(get_current_user)):
     m = _load_manifest(job_id)
     if not m:
         raise HTTPException(status_code=404, detail="Job no encontrado")
@@ -495,7 +510,7 @@ async def get_job(job_id: str):
 
 
 @router.get("/jobs/{job_id}/progress")
-async def get_progress(job_id: str):
+async def get_progress(job_id: str, user = Depends(get_current_user)):
     m = _load_manifest(job_id)
     if not m:
         raise HTTPException(status_code=404, detail="Job no encontrado")
@@ -503,21 +518,22 @@ async def get_progress(job_id: str):
 
 
 @router.get("/jobs/{job_id}/log")
-async def get_log(job_id: str, tail: int = 200):
+async def get_log(job_id: str, tail: int = 200, user = Depends(get_current_user)):
+    # Ya no se guarda logs/job.log en S3; usar manifest.log_tail
     s3 = _ensure_s3()
     log_key = _s3_key(job_id, LOG_KEY)
     lines: list[str] = []
-    used_fallback = False
-    try:
-        data = s3.download_bytes(log_key)
-        lines = data.decode("utf-8", errors="ignore").splitlines()
-    except Exception:
-        # Fallback: usar log_tail del manifest si existe
-        m = _load_manifest(job_id)
-        if m and m.log_tail:
-            lines = list(m.log_tail)
-            used_fallback = True
-        else:
+    used_fallback = True
+    m = _load_manifest(job_id)
+    if m and m.log_tail:
+        lines = list(m.log_tail)
+    else:
+        # Compatibilidad si existiera logs/job.log antiguos
+        try:
+            data = s3.download_bytes(log_key)
+            lines = data.decode("utf-8", errors="ignore").splitlines()
+            used_fallback = False
+        except Exception:
             lines = []
 
     if tail and tail > 0:
@@ -549,7 +565,7 @@ async def get_log(job_id: str, tail: int = 200):
 
 
 @router.get("/jobs/{job_id}/stls")
-async def get_stls(job_id: str):
+async def get_stls(job_id: str, user = Depends(get_current_user)):
     s3 = _ensure_s3()
     base1 = s3.join_key(s3.cfg.prefix or "", job_id)
     base2 = s3.join_key(base1, RESULT_SUBDIR)
@@ -582,7 +598,7 @@ async def get_stls(job_id: str):
 
 
 @router.get("/jobs/{job_id}/result")
-async def get_result(job_id: str, expires: int = 3600):
+async def get_result(job_id: str, expires: int = 3600, user = Depends(get_current_user)):
     s3 = _ensure_s3()
     m = _load_manifest(job_id)
     if not m:
@@ -633,7 +649,7 @@ async def finalize_job(job_id: str, payload: FinalizeJobIn, db: Session = Depend
 
 
 @router.delete("/jobs/{job_id}")
-async def cancel_job(job_id: str):
+async def cancel_job(job_id: str, user = Depends(require_admin)):
     import psutil
     s3 = _ensure_s3()
     m = _load_manifest(job_id)
@@ -641,17 +657,27 @@ async def cancel_job(job_id: str):
         return {"status": "not_found"}
 
     pid_to_kill = None
-    try:
-        log_key = _s3_key(job_id, LOG_KEY)
-        data = s3.download_bytes(log_key)
-        for line in data.decode("utf-8", errors="ignore").splitlines():
+    # Primero intentar desde el manifest.log_tail
+    if m.log_tail:
+        for line in m.log_tail:
             if "PID worker:" in line:
                 try:
                     pid_to_kill = int(line.split("PID worker:")[1].strip())
                 except Exception:
                     pass
-    except Exception:
-        pass
+    # Compatibilidad con logs antiguos en S3
+    if not pid_to_kill:
+        try:
+            log_key = _s3_key(job_id, LOG_KEY)
+            data = s3.download_bytes(log_key)
+            for line in data.decode("utf-8", errors="ignore").splitlines():
+                if "PID worker:" in line:
+                    try:
+                        pid_to_kill = int(line.split("PID worker:")[1].strip())
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     if pid_to_kill:
         try:
@@ -702,3 +728,51 @@ def _require_s3_env():
         return
     # endpoint presente, ok
     return
+
+
+@router.get("/patients-with-stl", response_model=list[PatientJobSTLOut])
+def patients_with_stl(db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """Lista pacientes que tienen registros en JobSTL.
+    - Admin: ve todos
+    - Médico: solo sus pacientes
+    Devuelve id_jobstl, job_id, id_paciente y datos básicos del paciente.
+    """
+    q = db.query(JobSTL, Paciente).join(Paciente, JobSTL.id_paciente == Paciente.id_paciente)
+    if getattr(user, "rol", None) != "ADMINISTRADOR":
+        med = db.query(Medico).filter(Medico.id_usuario == user.id_usuario).first()
+        if not med:
+            return []
+        q = q.filter(Paciente.id_medico == med.id_medico)
+    rows = q.order_by(JobSTL.created_at.desc()).all()
+    out: list[PatientJobSTLOut] = []
+    for js, p in rows:
+        out.append(PatientJobSTLOut(
+            id_jobstl=js.id_jobstl,
+            job_id=js.job_id,
+            id_paciente=js.id_paciente,
+            nombres=getattr(p, "nombres", None),
+            apellidos=getattr(p, "apellidos", None),
+            doc_numero=getattr(p, "doc_numero", None),
+            created_at=str(getattr(js, "created_at", "")) if getattr(js, "created_at", None) else None,
+        ))
+    return out
+
+
+@router.get("/jobs/{job_id}/result/bytes")
+async def download_result_zip_bytes(job_id: str):
+    """Descarga el ZIP de resultados desde S3 y lo devuelve en la misma
+    respuesta, para evitar problemas de CORS con URLs presignadas.
+    """
+    s3 = _ensure_s3()
+    key = _s3_key(job_id, RESULT_ZIP)
+    if not s3.exists(key):
+        raise HTTPException(status_code=404, detail="ZIP no encontrado en S3")
+    try:
+        data = s3.download_bytes(key)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"S3 download error: {e}")
+    headers = {
+        "Content-Disposition": f"inline; filename=stl_result_{job_id}.zip",
+        "Cache-Control": "private, max-age=60",
+    }
+    return Response(content=data, media_type="application/zip", headers=headers)

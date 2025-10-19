@@ -13,6 +13,13 @@ from ..core.config import EPAYCO_PUBLIC_KEY, EPAYCO_TEST, BASE_URL
 router = APIRouter()
 
 
+def _unique_invoice(prefix: str, sus_id: int) -> str:
+    from datetime import datetime
+    import secrets
+    ts = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    rnd = secrets.token_hex(2)
+    return f"{prefix}-S{sus_id}-{ts}-{rnd}"
+
 def _build_onpage_html(amount: str, name: str, description: str, invoice: str, extra1: str):
     response_url = f"{BASE_URL}/epayco/response?ngrok-skip-browser-warning=1"
     confirmation_url = f"{BASE_URL}/epayco/confirmation"
@@ -77,7 +84,8 @@ def start_subscription(payload: StartSubscriptionIn, db: Session = Depends(get_d
         db.commit()
         db.refresh(sus)
 
-    invoice = f"3DVinciStudio-{sus.id_suscripcion}"
+    # Importante: ePayco exige que el invoice sea unico por intento de cobro
+    invoice = _unique_invoice("3DVinciStudio", sus.id_suscripcion)
     amount = f"{float(plan.precio):.2f}"
     name = f"Plan {plan.nombre}"
     description = f"Suscripcion {plan.periodo} ({plan.duracion_meses} meses)"
@@ -133,6 +141,59 @@ def my_subscription(db: Session = Depends(get_db), user=Depends(get_current_user
         "plan": plan_out,
         "can_resume": sus.estado == "PAUSADA",
         "can_start": sus.estado != "ACTIVA",
+    }
+
+
+@router.get("/subscriptions/mine/status")
+def my_subscription_status(db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """Detalle de la suscripción del médico autenticado: plan, expiración y último pago.
+    Devuelve can_pay=True si no está ACTIVA o está expirada.
+    """
+    from datetime import datetime
+
+    medico = db.query(Medico).filter(Medico.id_usuario == user.id_usuario).first()
+    medico_id = medico.id_medico if medico else None
+    if medico_id is None:
+        return {"has": False}
+
+    base_q = db.query(Suscripcion).filter(Suscripcion.id_medico == medico_id)
+    act = base_q.filter(Suscripcion.estado == "ACTIVA").order_by(Suscripcion.creado_en.desc()).first()
+    pau = base_q.filter(Suscripcion.estado == "PAUSADA").order_by(Suscripcion.creado_en.desc()).first()
+    sus = act or pau
+    if not sus:
+        return {"has": False}
+
+    plan = db.query(Plan).filter(Plan.id_plan == sus.id_plan).first()
+    last_pago = db.query(Pago).filter(Pago.id_suscripcion == sus.id_suscripcion).order_by(Pago.fecha_pago.desc()).first()
+
+    now = datetime.utcnow()
+    exp = getattr(sus, "fecha_expiracion", None)
+    is_active = sus.estado == "ACTIVA"
+    is_expired = bool(exp and exp <= now)
+    can_pay = (not is_active) or is_expired
+
+    return {
+        "has": True,
+        "estado": sus.estado,
+        "suscripcion_id": sus.id_suscripcion,
+        "plan": {
+            "id_plan": plan.id_plan if plan else None,
+            "nombre": plan.nombre if plan else None,
+            "precio": float(plan.precio) if plan else None,
+            "periodo": plan.periodo if plan else None,
+            "duracion_meses": plan.duracion_meses if plan else None,
+        } if plan else None,
+        "fecha_expiracion": sus.fecha_expiracion.isoformat() if sus.fecha_expiracion else None,
+        "last_payment": (
+            {
+                "fecha_pago": last_pago.fecha_pago.isoformat() if last_pago and last_pago.fecha_pago else None,
+                "monto": float(last_pago.monto) if last_pago else None,
+                "referencia": last_pago.referencia_epayco if last_pago else None,
+            }
+            if last_pago
+            else None
+        ),
+        "can_pay": can_pay,
     }
 
 

@@ -1,7 +1,8 @@
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+# En local, priorizar el .env para evitar desalineaciones con variables del sistema
+load_dotenv(override=True)
 
 def mysql_url() -> str:
     url = os.getenv("MYSQL_URL")
@@ -17,6 +18,18 @@ def mysql_url() -> str:
 JWT_SECRET = os.getenv("JWT_SECRET", "LeonardoDaVinci")
 JWT_ALG = os.getenv("JWT_ALG", "HS256")
 JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "60"))
+
+# Refresh tokens (cookies)
+REFRESH_TOKEN_EXPIRE_MINUTES = int(os.getenv("REFRESH_TOKEN_EXPIRE_MINUTES", "43200"))  # 30 days
+REFRESH_COOKIE_NAME = os.getenv("REFRESH_COOKIE_NAME", "refresh_token")
+# SameSite values: 'lax' | 'strict' | 'none'
+REFRESH_COOKIE_SAMESITE = os.getenv("REFRESH_COOKIE_SAMESITE", "lax").lower()
+REFRESH_COOKIE_SECURE = os.getenv("REFRESH_COOKIE_SECURE", "false").lower() == "true"
+
+# CORS: Frontend origins (comma-separated)
+FRONTEND_ORIGINS = [
+    o.strip() for o in (os.getenv("FRONTEND_ORIGINS", "").split(",")) if o.strip()
+]
 
 # ePayco
 EPAYCO_PUBLIC_KEY = os.getenv("EPAYCO_PUBLIC_KEY", "")

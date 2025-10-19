@@ -4,6 +4,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship, Mapped, mapped_column
 from .db import Base
 from datetime import datetime
+from sqlalchemy import func
 
 class Hospital(Base):
     __tablename__ = "Hospital"
@@ -155,3 +156,33 @@ class VisorEstado(Base):
     i18n_json: Mapped[str] = mapped_column(Text, nullable=False)
     creado_en: Mapped[str] = mapped_column(TIMESTAMP, server_default=text("CURRENT_TIMESTAMP"))
     actualizado_en: Mapped[str] = mapped_column(TIMESTAMP, server_default=text("CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"))
+
+class Mensaje(Base):
+    __tablename__ = "mensaje"
+
+    id_mensaje: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    # relaciones
+    id_medico: Mapped[int] = mapped_column(Integer, ForeignKey("Medico.id_medico"), nullable=False)
+    medico = relationship("Medico", backref="mensajes")
+
+    # opcional: si quieres enlazar a paciente (el front lo manda como opcional)
+    id_paciente: Mapped[int | None] = mapped_column(Integer, ForeignKey("Paciente.id_paciente"), nullable=True)
+    paciente = relationship("Paciente", backref="mensajes", foreign_keys=[id_paciente])
+
+    # datos del mensaje
+    tipo: Mapped[str] = mapped_column(String(30), nullable=False)         # 'error' | 'sugerencia'
+    titulo: Mapped[str] = mapped_column(String(200), nullable=False)
+    descripcion: Mapped[str] = mapped_column(Text, nullable=False)
+    severidad: Mapped[str] = mapped_column(String(20), nullable=False)     # 'baja' | 'media' | 'alta'
+    adjunto_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    # workflow
+    estado: Mapped[str] = mapped_column(String(30), nullable=False, default="nuevo")
+    respuesta_admin: Mapped[str | None] = mapped_column(Text, nullable=True)
+    leido_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    leido_medico: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    # tiempos
+    creado_en: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    actualizado_en: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)

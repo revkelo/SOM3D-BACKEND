@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, Request
+import os
 from pydantic import EmailStr
 from sqlalchemy.orm import Session
 
@@ -15,8 +16,15 @@ from ..schemas import (
     ResetPasswordCodeIn,
 )
 from ..services.mailer import send_email
+from ..services.email_templates import (
+    template_reset_link,
+    template_reset_code,
+    template_verify_code,
+)
 from ..core.config import BASE_URL, FRONTEND_BASE_URL, VERIFY_EMAIL_EXPIRE_MIN, RESET_PASS_EXPIRE_MIN
 from ..core.config import (
+    JWT_SECRET,
+    JWT_ALG,
     REFRESH_TOKEN_EXPIRE_MINUTES,
     REFRESH_COOKIE_NAME,
     REFRESH_COOKIE_SAMESITE,
@@ -48,20 +56,26 @@ def login(payload: LoginIn, response: Response, db: Session = Depends(get_db)):
     # Permitimos login aunque esté inactivo para completar el pago
 
     access = create_access_token({"sub": str(user.id_usuario), "rol": user.rol, "email": user.correo})
-    # Set cookie de refresh
-    same = (REFRESH_COOKIE_SAMESITE or "lax").lower()
-    if same not in ("lax", "strict", "none"):
-        same = "lax"
     refresh = make_refresh_token(user.id_usuario, user.contrasena, REFRESH_TOKEN_EXPIRE_MINUTES)
-    response.set_cookie(
-        key=REFRESH_COOKIE_NAME,
-        value=refresh,
-        httponly=True,
-        secure=bool(REFRESH_COOKIE_SECURE),
-        samesite=same,
-        max_age=REFRESH_TOKEN_EXPIRE_MINUTES * 60,
-        path="/auth",
-    )
+    # Eliminar posibles cookies antiguas con path más específico para evitar colisiones
+    try:
+        response.delete_cookie(REFRESH_COOKIE_NAME, path="/auth")
+    except Exception:
+        pass
+    # usar helper que fija Path=/ para que el navegador la envíe en todas las rutas
+    try:
+        _set_refresh_cookie(response, refresh)
+    except NameError:
+        # fallback (por si el helper cambia de nombre)
+        response.set_cookie(
+            key=REFRESH_COOKIE_NAME,
+            value=refresh,
+            httponly=True,
+            secure=bool(REFRESH_COOKIE_SECURE),
+            samesite=(REFRESH_COOKIE_SAMESITE or "lax").lower(),
+            max_age=REFRESH_TOKEN_EXPIRE_MINUTES * 60,
+            path="/",
+        )
     return {"access_token": access, "token_type": "bearer"}
 
 
@@ -92,13 +106,8 @@ def forgot_password(payload: ForgotPasswordIn, db: Session = Depends(get_db)):
             link = f"{BASE_URL}/auth/reset-password/form?token={token}"
             if FRONTEND_BASE_URL:
                 link = f"{FRONTEND_BASE_URL}/reset_password.html?token={token}"
-            html = f"""
-                <h2>Restablecer contrasena</h2>
-                <p>Hola {user.nombre}, para restablecer tu contrasena haz clic aqui:</p>
-                <p><a href='{link}' target='_blank'>Restablecer contrasena</a></p>
-                <p><small>Este enlace expira en {RESET_PASS_EXPIRE_MIN} minutos.</small></p>
-            """.strip()
-            send_email(user.correo, "Restablecer contrasena", html)
+            html = template_reset_link(user.nombre or "Usuario", link, RESET_PASS_EXPIRE_MIN)
+            send_email(user.correo, "Restablecer contrasena - 3DVinci Health", html)
         except Exception:
             pass
     # Siempre OK para no filtrar existencia
@@ -134,13 +143,8 @@ def forgot_password_code(payload: ForgotPasswordIn, db: Session = Depends(get_db
             }
             token = make_reset_code_token(data, RESET_PASS_EXPIRE_MIN)
             # Enviar correo con el código
-            html = f"""
-                <h2>Restablecer contrasena</h2>
-                <p>Hola {user.nombre}, usa este codigo para restablecer tu contrasena:</p>
-                <p style='font-size:22px;letter-spacing:4px'><b>{code}</b></p>
-                <p><small>El codigo expira en {RESET_PASS_EXPIRE_MIN} minutos.</small></p>
-            """.strip()
-            send_email(user.correo, "Tu codigo de restablecimiento", html)
+            html = template_reset_code(user.nombre or "Usuario", code, RESET_PASS_EXPIRE_MIN)
+            send_email(user.correo, "Codigo de restablecimiento - 3DVinci Health", html)
             return {"ok": True, "token": token, "expires_in": RESET_PASS_EXPIRE_MIN}
         except Exception:
             pass
@@ -195,13 +199,8 @@ def pre_register(payload: RegisterIn, db: Session = Depends(get_db)):
     }
     token = make_pre_register_token(data, VERIFY_EMAIL_EXPIRE_MIN)
     # Send email with verification code (no link)
-    html = f"""
-        <h2>Verifica tu correo</h2>
-        <p>Hola {payload.nombre}, usa el siguiente codigo para confirmar tu registro:</p>
-        <p style='font-size:22px;letter-spacing:4px'><b>{code}</b></p>
-        <p><small>El codigo expira en {VERIFY_EMAIL_EXPIRE_MIN} minutos.</small></p>
-    """.strip()
-    res = send_email(str(payload.correo), "Tu codigo de verificacion", html)
+    html = template_verify_code(payload.nombre or "Usuario", code, VERIFY_EMAIL_EXPIRE_MIN)
+    res = send_email(str(payload.correo), "Verifica tu correo - 3DVinci Health", html)
     if not res.get("ok"):
         raise HTTPException(status_code=502, detail=f"Fallo enviando correo: {res}")
     # Return token to be used with code on frontend
@@ -296,12 +295,13 @@ def _set_refresh_cookie(response: Response, token: str):
         secure=bool(REFRESH_COOKIE_SECURE),
         samesite=same,
         max_age=REFRESH_TOKEN_EXPIRE_MINUTES * 60,
-        path="/auth",
+        # Usar path raiz para que el navegador la envíe en cualquier ruta
+        path="/",
     )
 
 
 def _clear_refresh_cookie(response: Response):
-    response.delete_cookie(REFRESH_COOKIE_NAME, path="/auth")
+    response.delete_cookie(REFRESH_COOKIE_NAME, path="/")
 
 
 @router.post("/refresh", response_model=TokenOut)

@@ -1,7 +1,8 @@
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+# En local, priorizar el .env para evitar desalineaciones con variables del sistema
+load_dotenv(override=True)
 
 def mysql_url() -> str:
     url = os.getenv("MYSQL_URL")

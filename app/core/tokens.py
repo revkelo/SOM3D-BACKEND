@@ -37,7 +37,7 @@ def make_reset_token(user_id: int, hashed_password: str, expires_minutes: int) -
     fp = _fp_password(hashed_password)
     payload = {
         "k": "reset_password",
-        "sub": user_id,
+        "sub": str(user_id),
         "fp": fp,
         "iat": int(_now().timestamp()),
         "exp": int((_now() + timedelta(minutes=expires_minutes)).timestamp()),
@@ -91,7 +91,7 @@ def make_refresh_token(user_id: int, hashed_password: str, expires_minutes: int 
     exp_min = expires_minutes if expires_minutes is not None else REFRESH_TOKEN_EXPIRE_MINUTES
     payload = {
         "k": "refresh",
-        "sub": int(user_id),
+        "sub": str(user_id),
         # Fingerprint del password para invalidar refresh si cambia la contraseña
         "fp": _fp_password(hashed_password),
         "iat": int(_now().timestamp()),

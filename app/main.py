@@ -22,7 +22,8 @@ from .routes.hospitals import router as hospitals_router
 try:
     _dotenv_path = find_dotenv(usecwd=True)
     if _dotenv_path:
-        load_dotenv(_dotenv_path, override=False)
+        # En desarrollo priorizamos el .env sobre variables del entorno del sistema
+        load_dotenv(_dotenv_path, override=True)
 except Exception:
     pass
 

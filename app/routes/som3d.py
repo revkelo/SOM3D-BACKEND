@@ -41,7 +41,7 @@ S3: Optional[S3Manager] = None
 DEFAULT_PREFIX = os.getenv("S3_PREFIX", "jobs/")
 RESULT_SUBDIR = "stls"
 # Mantener constante por compatibilidad, pero no se subirá el log a S3
-LOG_KEY = "logs/job.log"
+LOG_KEY = "job.log"
 MANIFEST_KEY = "manifest.json"
 INPUT_ZIP = "input.zip"
 RESULT_ZIP = "stl_result.zip"
@@ -142,8 +142,8 @@ def _save_manifest(m: JobManifest) -> None:
 
 
 def _append_log(job_id: str, line: str, manifest: Optional[JobManifest] = None):
-    """Agrega una línea de log solo al manifiesto en S3.
-    Ya no se persiste logs/job.log como objeto independiente.
+    """Agrega una línea de log al manifest (tail pequeño en S3).
+    El log completo se guarda por el worker como `job.log` al finalizar o ante error.
     """
     m = manifest or _load_manifest(job_id)
     if not m:
@@ -164,6 +164,30 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
 
     s3 = S3Manager(S3Config(**s3_cfg))
 
+    # Buffer en memoria para conservar el log completo; al final se sube a S3
+    log_buffer: list[str] = []
+
+    # Medición de tiempos por fase
+    t_all_start = time.time()
+    t_seg_start: Optional[float] = None
+    t_conv_start: Optional[float] = None
+    t_zip_start: Optional[float] = None
+    seg_seconds: Optional[float] = None
+    conv_seconds: Optional[float] = None
+    zip_seconds: Optional[float] = None
+
+    def _fmt_dur(seconds: Optional[float]) -> str:
+        try:
+            if seconds is None:
+                return "N/A"
+            total = float(seconds)
+            s = int(round(total))
+            m, sec = divmod(s, 60)
+            h, m = divmod(m, 60)
+            return f"{h:02d}:{m:02d}:{sec:02d} ({total:.2f}s)"
+        except Exception:
+            return str(seconds)
+
     def s3_key(*parts: str) -> str:
         base = s3.join_key(s3_cfg.get("prefix") or DEFAULT_PREFIX, job_id)
         return s3.join_key(base, *parts)
@@ -183,7 +207,7 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
     def wlog(msg: str):
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
         line = f"[{ts}] {msg}"
-        # Solo actualizar el manifiesto; no subir logs/job.log a S3
+        # Actualizar el manifest con un tail pequeño para progreso en vivo
         try:
             key = s3_key(MANIFEST_KEY)
             try:
@@ -197,6 +221,11 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
             mani["log_tail"] = tail
             mani["updated_at"] = _now_ts()
             s3.upload_bytes(json.dumps(mani, ensure_ascii=False, indent=2).encode("utf-8"), key)
+        except Exception:
+            pass
+        # Mantener copia completa en buffer para subirla como logs/job.log
+        try:
+            log_buffer.append(line)
         except Exception:
             pass
 
@@ -226,6 +255,17 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
             "percent": 99.0
         })
         _update_jobconv("ERROR", set_finished=True)
+        # Intentar subir el log completo recopilado hasta el error
+        try:
+            full = ("\n".join(log_buffer) + "\n").encode("utf-8") if log_buffer else b""
+            s3.upload_bytes(full, s3_key(LOG_KEY), content_type="text/plain; charset=utf-8")
+            # Borrar manifest.json para dejar solo el job.log
+            try:
+                s3.delete(s3_key(MANIFEST_KEY))
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     try:
         write_manifest_patch({"status": "running", "phase": "totalsegmentator"})
@@ -260,6 +300,7 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
 
             try:
                 wlog("Iniciando TotalSegmentator ...")
+                t_seg_start = time.time()
                 runner = TotalSegmentatorRunner(
                     robust_import=True,
                     enable_ortopedia=bool(params.get("enable_ortopedia", False)),
@@ -270,7 +311,8 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
                     on_log=lambda s: wlog(str(s)),
                 )
                 runner.run(input_zip, ts_out)
-                wlog("TotalSegmentator finalizado.")
+                seg_seconds = time.time() - (t_seg_start or time.time())
+                wlog(f"TotalSegmentator finalizado. Tiempo segmentación: {_fmt_dur(seg_seconds)}")
                 write_manifest_patch({"phase": "converting", "percent": 70.0})
             except Exception as e:
                 save_worker_error("totalsegmentator", e)
@@ -278,10 +320,12 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
 
             try:
                 wlog("Convirtiendo NIfTI a STL ...")
+                t_conv_start = time.time()
                 conv = NiftiToSTLConverter(progress_cb=lambda s: wlog(str(s)))
                 nifti_root = _collect_nifti_root(ts_out)
                 conv.convert_folder(nifti_root, stl_out, recursive=True)
-                wlog("Conversión a STL finalizada.")
+                conv_seconds = time.time() - (t_conv_start or time.time())
+                wlog(f"Conversión a STL finalizada. Tiempo conversión: {_fmt_dur(conv_seconds)}")
                 write_manifest_patch({"phase": "zipping", "percent": 90.0})
             except Exception as e:
                 save_worker_error("convert_to_stl", e)
@@ -290,9 +334,11 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
             try:
                 hq_dir = stl_out / "hq_suavizado_decimado"
                 target = hq_dir if (hq_dir.exists() and any(hq_dir.rglob('*.stl'))) else stl_out
+                t_zip_start = time.time()
                 zip_bytes = _zip_dir_to_bytes(target)
                 s3.upload_bytes(zip_bytes, s3_key(RESULT_ZIP), content_type="application/zip")
-                wlog("ZIP subido a S3.")
+                zip_seconds = time.time() - (t_zip_start or time.time())
+                wlog(f"ZIP subido a S3. Tiempo empaquetado/subida: {_fmt_dur(zip_seconds)}")
             except Exception as e:
                 save_worker_error("zip_upload", e)
                 return
@@ -306,16 +352,46 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
             except Exception:
                 stl_count = 0
             stl_zip_size = int(len(zip_bytes or b""))
+            total_seconds = time.time() - t_all_start
+            # Registrar métricas incluyendo tiempos
             write_manifest_patch({
                 "status": "done",
                 "phase": "finished",
                 "percent": 100.0,
                 "error": None,
-                "metrics": {"stl_count": stl_count, "stl_zip_size": stl_zip_size},
+                "metrics": {
+                    "stl_count": stl_count,
+                    "stl_zip_size": stl_zip_size,
+                    "durations": {
+                        "segment_seconds": float(seg_seconds or 0.0),
+                        "convert_seconds": float(conv_seconds or 0.0),
+                        "zip_seconds": float(zip_seconds or 0.0),
+                        "total_seconds": float(total_seconds or 0.0),
+                    }
+                },
                 "s3_keys_results": keys,
             })
+            # Resumen final de tiempos
+            wlog(
+                "Resumen tiempos — "
+                f"Segmentación: {_fmt_dur(seg_seconds)} | "
+                f"Conversión: {_fmt_dur(conv_seconds)} | "
+                f"Zip/Subida: {_fmt_dur(zip_seconds)} | "
+                f"Total: {_fmt_dur(total_seconds)}"
+            )
             wlog("Job terminado.")
             _update_jobconv("DONE", set_finished=True)
+            # Subir el log completo a S3 para permitir consulta completa
+            try:
+                full = ("\n".join(log_buffer) + "\n").encode("utf-8") if log_buffer else b""
+                s3.upload_bytes(full, s3_key(LOG_KEY), content_type="text/plain; charset=utf-8")
+                # Borrar manifest.json para dejar solo el job.log
+                try:
+                    s3.delete(s3_key(MANIFEST_KEY))
+                except Exception:
+                    pass
+            except Exception:
+                pass
 
             # Registrar JobSTL en BD si hay db_url y un paciente asociado en params
             try:
@@ -518,23 +594,50 @@ async def get_progress(job_id: str, user = Depends(get_current_user)):
 
 
 @router.get("/jobs/{job_id}/log")
-async def get_log(job_id: str, tail: int = 200, user = Depends(get_current_user)):
-    # Ya no se guarda logs/job.log en S3; usar manifest.log_tail
+async def get_log(job_id: str, tail: int = 200, full: bool = False, user = Depends(get_current_user)):
+    # El log principal se guarda como job.log en la raíz del job.
+    # Si no existe (jobs antiguos o en progreso), se intenta usar el manifest.log_tail como fallback.
     s3 = _ensure_s3()
     log_key = _s3_key(job_id, LOG_KEY)
     lines: list[str] = []
     used_fallback = True
-    m = _load_manifest(job_id)
-    if m and m.log_tail:
-        lines = list(m.log_tail)
-    else:
-        # Compatibilidad si existiera logs/job.log antiguos
+
+    # Si se solicita el log completo y existe en S3, priorizarlo
+    if full:
         try:
             data = s3.download_bytes(log_key)
             lines = data.decode("utf-8", errors="ignore").splitlines()
             used_fallback = False
         except Exception:
-            lines = []
+            # Intentar compatibilidad con ruta antigua logs/job.log
+            try:
+                old_key = _s3_key(job_id, "logs/job.log")
+                data = s3.download_bytes(old_key)
+                lines = data.decode("utf-8", errors="ignore").splitlines()
+                used_fallback = False
+            except Exception:
+                # Si no existe, caer al manifest.log_tail
+                pass
+
+    if not lines:
+        m = _load_manifest(job_id)
+        if m and m.log_tail:
+            lines = list(m.log_tail)
+        else:
+            # Compatibilidad si existiera logs/job.log antiguos
+            try:
+                data = s3.download_bytes(log_key)
+                lines = data.decode("utf-8", errors="ignore").splitlines()
+                used_fallback = False
+            except Exception:
+                # Intentar compatibilidad con ruta antigua logs/job.log
+                try:
+                    old_key = _s3_key(job_id, "logs/job.log")
+                    data = s3.download_bytes(old_key)
+                    lines = data.decode("utf-8", errors="ignore").splitlines()
+                    used_fallback = False
+                except Exception:
+                    lines = []
 
     if tail and tail > 0:
         try:
@@ -561,6 +664,7 @@ async def get_log(job_id: str, tail: int = 200, user = Depends(get_current_user)
         "fallback": used_fallback,
         "status": status,
         "phase": phase,
+        "full_available": (not used_fallback),
     }
 
 
@@ -665,11 +769,24 @@ async def cancel_job(job_id: str, user = Depends(require_admin)):
                     pid_to_kill = int(line.split("PID worker:")[1].strip())
                 except Exception:
                     pass
-    # Compatibilidad con logs antiguos en S3
+    # Intentar leer job.log en la raíz
     if not pid_to_kill:
         try:
             log_key = _s3_key(job_id, LOG_KEY)
             data = s3.download_bytes(log_key)
+            for line in data.decode("utf-8", errors="ignore").splitlines():
+                if "PID worker:" in line:
+                    try:
+                        pid_to_kill = int(line.split("PID worker:")[1].strip())
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+    # Compatibilidad con ruta antigua logs/job.log
+    if not pid_to_kill:
+        try:
+            old_key = _s3_key(job_id, "logs/job.log")
+            data = s3.download_bytes(old_key)
             for line in data.decode("utf-8", errors="ignore").splitlines():
                 if "PID worker:" in line:
                     try:

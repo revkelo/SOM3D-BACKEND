@@ -4,7 +4,6 @@
 
 import os, sys, time, shutil
 from pathlib import Path
-import csv
 import numpy as np
 
 # ---- Opcional: activar modo "solo GPU" si hay CuPy ----
@@ -371,7 +370,6 @@ class NiftiToSTLConverter:
       - Otsu GPU (CuPy) o CPU (fallback o modo solo-GPU)
       - Marching Cubes vía VTK (preferido) o scikit-image (fallback)
       - STL original + STL HQ (suavizado-only si pequeño; si no, decimation agresivo + suavizado)
-      - Log CSV opcional
     """
 
     def __init__(self, *, progress_cb=None):
@@ -389,7 +387,6 @@ class NiftiToSTLConverter:
         clip_max: float | None = None,
         exclude_zeros: bool = True,
         min_voxels: int = 10,
-        log_name: str = "log.csv",
     ) -> dict:
         """
         Procesa todos los .nii/.nii.gz en input_dir y guarda STL en output_dir.
@@ -404,7 +401,6 @@ class NiftiToSTLConverter:
 
         originals_dir = output_dir / "originales"
         hq_dir = output_dir / "hq_suavizado_decimado"
-        log_path = output_dir / (log_name or "log.csv")
 
         self._log(f"\n=== Conversión iniciada ===\n")
         self._log(f"GPU CuPy: {'Sí' if _HAS_CUPY else 'No'} | MC: {'VTK' if _HAS_VTK else 'skimage'}\n")
@@ -620,29 +616,7 @@ class NiftiToSTLConverter:
                     "message": str(exc), "seconds": f"{elapsed:.3f}",
                 })
 
-        # Escribir log CSV
-        try:
-            output_dir.mkdir(parents=True, exist_ok=True)
-            with open(log_path, "w", newline="", encoding="utf-8") as fh:
-                w = csv.writer(fh)
-                w.writerow([
-                    "file","name","success","method","auto_t","faces_before","faces_after","voxels_mask",
-                    "stl","stl_size_bytes","stl_size_hr",
-                    "stl_reduced","stl_reduced_size_bytes","stl_reduced_size_hr","size_saving_pct",
-                    "message","seconds"
-                ])
-                for r in results:
-                    w.writerow([
-                        r["file"], r["name"], r["success"], r["method"], r["auto_t"],
-                        r["faces_before"], r["faces_after"], r["voxels_mask"],
-                        r["stl"], r.get("stl_size_bytes",""), r.get("stl_size_hr",""),
-                        r["stl_reduced"], r.get("stl_reduced_size_bytes",""), r.get("stl_reduced_size_hr",""),
-                        r.get("size_saving_pct",""),
-                        r["message"], r["seconds"]
-                    ])
-            self._log(f"\nLog: {log_path}\n")
-        except Exception as exc:
-            self._log(f"\nNo se pudo escribir log: {exc}\n")
+        # (Se eliminó la escritura de CSV: no se requiere)
 
         # Resumen de tamaño total (opcional)
         try:
@@ -662,7 +636,6 @@ class NiftiToSTLConverter:
             "ok": True,
             "message": f"Completado: {successes}/{total} OK",
             "results": results,
-            "log_csv": str(log_path),
             "elapsed_sec": total_elapsed
         }
 
@@ -685,7 +658,6 @@ class NiftiToSTLConverter:
             recursive=False,
             clip_min=clip_min, clip_max=clip_max,
             exclude_zeros=exclude_zeros, min_voxels=min_voxels,
-            log_name="log_single.csv"
         )["results"][0]
 
     # ---- Helper de logging interno ----
@@ -717,7 +689,7 @@ if __name__ == "__main__":
     ap.add_argument("--clip-max", type=float, default=None)
     ap.add_argument("--include-zeros", action="store_true", help="No excluir ceros antes de Otsu")
     ap.add_argument("--min-voxels", type=int, default=10)
-    ap.add_argument("--log-name", type=str, default="log.csv")
+    # (Se eliminó --log-name; no se genera CSV)
     args = ap.parse_args()
 
     conv = NiftiToSTLConverter()
@@ -729,5 +701,5 @@ if __name__ == "__main__":
         clip_max=args.clip_max,
         exclude_zeros=not args.include_zeros,
         min_voxels=args.min_voxels,
-        log_name=args.log_name
+        
     )

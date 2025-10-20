@@ -592,7 +592,15 @@ class TotalSegmentatorRunner:
 
             # 1) ORTOPEDIA (por defecto ON)
             if self.enable_ortopedia:
-                orto_flags = self._normalize_roi_subset_args(["--roi_subset", *ORTHO_ROI] + flags_common)
+                # Si también se ejecutará CRANIO, evitar generar 'skull' en ORTOPEDIA
+                roi_subset = list(ORTHO_ROI)
+                if "craniofacial_structures" in self.extra_tasks and "skull" in roi_subset:
+                    try:
+                        roi_subset.remove("skull")
+                        self._flag(self.on_log, "TS|ORTOPEDIA", "ROI ajuste", "sin 'skull' (por CRANIO)")
+                    except Exception:
+                        pass
+                orto_flags = self._normalize_roi_subset_args(["--roi_subset", *roi_subset] + flags_common)
                 self._flag(self.on_log, "TS", "Resumen ORTOPEDIA", f"task=total | stats=ON")
                 t0_orto = time.perf_counter()
                 rc1 = self._run_totalseg_gpu_then_cpu(Path(nii_input), output_path, "total", orto_flags)

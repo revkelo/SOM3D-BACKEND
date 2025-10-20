@@ -4,7 +4,7 @@ from sqlalchemy import func
 
 from ..db import get_db
 from ..core.security import get_current_user
-from ..models import Hospital, Medico, Suscripcion, Pago
+from ..models import Hospital, Medico, Suscripcion, Pago, Plan
 from ..schemas import HospitalIn, HospitalOut, HospitalUpdateIn
 
 
@@ -75,6 +75,20 @@ def admin_create_hospital(payload: HospitalIn, db: Session = Depends(get_db), us
     db.add(hosp)
     db.commit()
     db.refresh(hosp)
+
+    # Si enviaron plan_id, crear Suscripcion en PAUSADA para el hospital
+    if getattr(payload, "plan_id", None):
+        plan = db.query(Plan).filter(Plan.id_plan == int(payload.plan_id)).first()
+        if plan:
+            sus = Suscripcion(
+                id_medico=None,
+                id_hospital=hosp.id_hospital,
+                id_plan=plan.id_plan,
+                estado="PAUSADA",
+            )
+            db.add(sus)
+            db.commit()
+
     return hosp
 
 

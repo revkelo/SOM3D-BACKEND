@@ -1,5 +1,5 @@
-from pydantic import BaseModel, EmailStr, Field
-from typing import Optional, Literal
+from pydantic import BaseModel, EmailStr, Field, ConfigDict
+from typing import Optional, Literal, List
 from datetime import date, datetime
 
 class RegisterIn(BaseModel):
@@ -51,6 +51,8 @@ class HospitalIn(BaseModel):
     telefono: Optional[str] = Field(default=None, max_length=30)
     correo: Optional[EmailStr] = None
     codigo: Optional[str] = Field(default=None, min_length=1, max_length=12)
+    # Opcional: al crear el hospital, asociarlo a un plan creando una Suscripcion en PAUSADA
+    plan_id: Optional[int] = None
 
 class HospitalUpdateIn(BaseModel):
     nombre: Optional[str] = Field(default=None, max_length=150)
@@ -73,6 +75,15 @@ class HospitalOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class HospitalLinkByCodeIn(BaseModel):
+    codigo: str = Field(min_length=1, max_length=12)
+
+
+class HospitalStartSubscriptionIn(BaseModel):
+    codigo: str = Field(min_length=1, max_length=12)
+    plan_id: Optional[int] = None
 
 
 # --------------------
@@ -351,3 +362,29 @@ class VisorEstadoOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+# --------------------
+# Mensajes
+# --------------------
+class MensajeBase(BaseModel):
+    id_medico: int
+    id_paciente: Optional[int] = None
+    tipo: str
+    titulo: str
+    descripcion: str
+    severidad: str
+    adjunto_url: Optional[str] = None
+    estado: str
+    respuesta_admin: Optional[str] = None
+    leido_admin: bool
+    leido_medico: bool
+
+class MensajeOut(MensajeBase):
+    id_mensaje: int
+    creado_en: Optional[datetime] = None
+    actualizado_en: Optional[datetime] = None
+    model_config = ConfigDict(from_attributes=True)  # <- correcto en v2
+
+class MensajeList(BaseModel):
+    total: int
+    items: List[MensajeOut]

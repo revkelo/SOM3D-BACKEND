@@ -66,3 +66,10 @@ def get_current_user_optional(
         return user
     except HTTPException:
         return None
+
+
+def require_admin(user = Depends(get_current_user)):
+    rol = getattr(user, "rol", None)
+    if str(rol).upper() != "ADMINISTRADOR":
+        raise HTTPException(status_code=403, detail="Requiere rol ADMINISTRADOR")
+    return user

@@ -1,8 +1,9 @@
 from fastapi import FastAPI
 import os
+
+from dotenv import load_dotenv, find_dotenv
 from starlette.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from dotenv import load_dotenv, find_dotenv
 
 from .routes.auth import router as auth_router
 from .routes.plans import router as plans_router
@@ -16,20 +17,26 @@ from .routes.som3d import router as som3d_router
 from .routes.patients import router as patients_router
 from .routes.studies import router as studies_router
 from .routes.visor import router as visor_router
+from .routes.messages import router as mensajes_router
+from .routes.hospitals import router as hospitals_router
 
 # Cargar variables de entorno desde .env si existe
 try:
     _dotenv_path = find_dotenv(usecwd=True)
     if _dotenv_path:
-        load_dotenv(_dotenv_path, override=False)
+        # En desarrollo priorizamos el .env sobre variables del entorno del sistema
+        load_dotenv(_dotenv_path, override=True)
 except Exception:
     pass
 
+from .core.config import FRONTEND_ORIGINS
+
 app = FastAPI(title="SOM3D Backend", version="1.0.0")
 
+_cors_origins = FRONTEND_ORIGINS if FRONTEND_ORIGINS else ["*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -44,10 +51,12 @@ app.include_router(som3d_router)   # /som3d/...
 app.include_router(patients_router)  # /patients
 app.include_router(studies_router)   # /studies
 app.include_router(visor_router)     # /visor
+app.include_router(hospitals_router) # /hospitals
 app.include_router(doctors_router)   # /admin/doctors
 app.include_router(admin_router)     # /admin/metrics
 app.include_router(admin_hospitals_router)  # /admin/hospitals
 app.include_router(admin_users_router)      # /admin/users
+app.include_router(mensajes_router)
 
 # Static files (admin dashboard)
 static_dir = os.path.join(os.path.dirname(__file__), "static")

@@ -30,6 +30,7 @@ except Exception:
     pass
 
 from .core.config import FRONTEND_ORIGINS
+from .core.health import ensure_services_ready, run_health_checks
 
 app = FastAPI(title="SOM3D Backend", version="1.0.0")
 
@@ -63,6 +64,13 @@ static_dir = os.path.join(os.path.dirname(__file__), "static")
 if os.path.isdir(static_dir):
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
+@app.on_event("startup")
+async def startup_healthcheck():
+    # Ensure critical dependencies are available before serving traffic
+    ensure_services_ready()
+
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    services = run_health_checks()
+    overall = "ok" if all(s.get("status") == "ok" for s in services.values()) else "error"
+    return {"status": overall, "services": services}

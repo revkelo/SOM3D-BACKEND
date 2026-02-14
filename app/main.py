@@ -49,14 +49,14 @@ app.include_router(plans_router, tags=["plans"])
 app.include_router(subs_router, tags=["subscriptions"])
 app.include_router(epayco_router)  # /epayco/...
 app.include_router(som3d_router)   # /som3d/...
-app.include_router(patients_router)  # /patients
-app.include_router(studies_router)   # /studies
-app.include_router(visor_router)     # /visor
-app.include_router(hospitals_router) # /hospitals
-app.include_router(doctors_router)   # /admin/doctors
-app.include_router(admin_router)     # /admin/metrics
-app.include_router(admin_hospitals_router)  # /admin/hospitals
-app.include_router(admin_users_router)      # /admin/users
+app.include_router(patients_router, tags=["patients"])  # /patients
+app.include_router(studies_router, tags=["studies"])   # /studies
+app.include_router(visor_router, tags=["visor"])       # /visor
+app.include_router(hospitals_router, tags=["hospitals"]) # /hospitals
+app.include_router(doctors_router, tags=["doctors"])   # /admin/doctors
+app.include_router(admin_router, tags=["admin"])       # /admin/metrics
+app.include_router(admin_hospitals_router, tags=["admin-hospitals"])  # /admin/hospitals
+app.include_router(admin_users_router, tags=["admin-users"])      # /admin/users
 app.include_router(mensajes_router)
 
 # Static files (admin dashboard)
@@ -69,7 +69,7 @@ async def startup_healthcheck():
     # Ensure critical dependencies are available before serving traffic
     ensure_services_ready()
 
-@app.get("/health")
+@app.get("/health", tags=["health"])
 def health():
     services = run_health_checks()
     overall = "ok" if all(s.get("status") == "ok" for s in services.values()) else "error"

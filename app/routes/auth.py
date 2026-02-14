@@ -220,7 +220,8 @@ def pre_register(payload: RegisterIn, db: Session = Depends(get_db)):
         "telefono": payload.telefono,
         "direccion": payload.direccion,
         "ciudad": payload.ciudad,
-        "rol": payload.rol,
+        # Seguridad: el preregistro público nunca eleva privilegios.
+        "rol": "MEDICO",
         "code": code,
     }
     token = make_pre_register_token(data, VERIFY_EMAIL_EXPIRE_MIN)
@@ -253,7 +254,7 @@ def confirm_register_code(payload: ConfirmCodeIn, db: Session = Depends(get_db))
         telefono=data.get("telefono"),
         direccion=data.get("direccion"),
         ciudad=data.get("ciudad"),
-        rol=data.get("rol") or "MEDICO",
+        rol="MEDICO",
         activo=False,
     )
     db.add(user)

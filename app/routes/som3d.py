@@ -30,6 +30,23 @@ from ..core.config import mysql_url
 router = APIRouter(prefix="/som3d", tags=["som3d"])
 
 
+def _is_admin(user: Any) -> bool:
+    return str(getattr(user, "rol", "")).upper() == "ADMINISTRADOR"
+
+
+def _ensure_job_access(db: Session, user: Any, job_id: str) -> None:
+    if _is_admin(user):
+        return
+    owner = (
+        db.query(JobConv.job_id)
+        .filter(JobConv.job_id == job_id, JobConv.id_usuario == user.id_usuario)
+        .first()
+    )
+    if not owner:
+        # Evita filtrar existencia de jobs de terceros.
+        raise HTTPException(status_code=404, detail="Job no encontrado")
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
     v = os.getenv(name)
     if v is None:
@@ -647,7 +664,8 @@ async def list_jobs_tracking(db: Session = Depends(get_db), user=Depends(require
 
 
 @router.get("/jobs/{job_id}")
-async def get_job(job_id: str, user = Depends(get_current_user)):
+async def get_job(job_id: str, db: Session = Depends(get_db), user = Depends(get_current_user)):
+    _ensure_job_access(db, user, job_id)
     m = _load_manifest(job_id)
     if not m:
         raise HTTPException(status_code=404, detail="Job no encontrado")
@@ -655,7 +673,8 @@ async def get_job(job_id: str, user = Depends(get_current_user)):
 
 
 @router.get("/jobs/{job_id}/progress")
-async def get_progress(job_id: str, user = Depends(get_current_user)):
+async def get_progress(job_id: str, db: Session = Depends(get_db), user = Depends(get_current_user)):
+    _ensure_job_access(db, user, job_id)
     m = _load_manifest(job_id)
     if not m:
         raise HTTPException(status_code=404, detail="Job no encontrado")
@@ -663,7 +682,14 @@ async def get_progress(job_id: str, user = Depends(get_current_user)):
 
 
 @router.get("/jobs/{job_id}/log")
-async def get_log(job_id: str, tail: int = 200, full: bool = False, user = Depends(get_current_user)):
+async def get_log(
+    job_id: str,
+    tail: int = 200,
+    full: bool = False,
+    db: Session = Depends(get_db),
+    user = Depends(get_current_user),
+):
+    _ensure_job_access(db, user, job_id)
     # El log principal se guarda como job.log en la raíz del job.
     # Si no existe (jobs antiguos o en progreso), se intenta usar el manifest.log_tail como fallback.
     s3 = _ensure_s3()
@@ -738,7 +764,8 @@ async def get_log(job_id: str, tail: int = 200, full: bool = False, user = Depen
 
 
 @router.get("/jobs/{job_id}/stls")
-async def get_stls(job_id: str, user = Depends(get_current_user)):
+async def get_stls(job_id: str, db: Session = Depends(get_db), user = Depends(get_current_user)):
+    _ensure_job_access(db, user, job_id)
     s3 = _ensure_s3()
     base1 = s3.join_key(s3.cfg.prefix or "", job_id)
     base2 = s3.join_key(base1, RESULT_SUBDIR)
@@ -771,7 +798,13 @@ async def get_stls(job_id: str, user = Depends(get_current_user)):
 
 
 @router.get("/jobs/{job_id}/result")
-async def get_result(job_id: str, expires: int = 3600, user = Depends(get_current_user)):
+async def get_result(
+    job_id: str,
+    expires: int = 3600,
+    db: Session = Depends(get_db),
+    user = Depends(get_current_user),
+):
+    _ensure_job_access(db, user, job_id)
     s3 = _ensure_s3()
     m = _load_manifest(job_id)
     if not m:
@@ -791,6 +824,7 @@ async def get_result(job_id: str, expires: int = 3600, user = Depends(get_curren
 
 @router.post("/jobs/{job_id}/finalize", response_model=JobSTLOut)
 async def finalize_job(job_id: str, payload: FinalizeJobIn, db: Session = Depends(get_db), user = Depends(get_current_user)):
+    _ensure_job_access(db, user, job_id)
     # Optionally mark JobConv as DONE and create JobSTL linked to a Paciente
     # Validate paciente ownership if medico
     med = db.query(Medico).filter(Medico.id_usuario == user.id_usuario).first()
@@ -945,10 +979,15 @@ def patients_with_stl(db: Session = Depends(get_db), user=Depends(get_current_us
 
 
 @router.get("/jobs/{job_id}/result/bytes")
-async def download_result_zip_bytes(job_id: str):
+async def download_result_zip_bytes(
+    job_id: str,
+    db: Session = Depends(get_db),
+    user = Depends(get_current_user),
+):
     """Descarga el ZIP de resultados desde S3 y lo devuelve en la misma
     respuesta, para evitar problemas de CORS con URLs presignadas.
     """
+    _ensure_job_access(db, user, job_id)
     s3 = _ensure_s3()
     key = _s3_key(job_id, RESULT_ZIP)
     if not s3.exists(key):

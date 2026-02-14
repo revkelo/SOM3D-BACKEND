@@ -10,7 +10,8 @@ class RegisterIn(BaseModel):
     telefono: Optional[str] = None
     direccion: Optional[str] = None
     ciudad: Optional[str] = None
-    rol: Literal["ADMINISTRADOR", "MEDICO"] = "MEDICO"
+    # El registro público solo permite cuentas MEDICO.
+    rol: Literal["MEDICO"] = "MEDICO"
 
 class LoginIn(BaseModel):
     correo: EmailStr

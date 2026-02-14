@@ -22,7 +22,7 @@ from app.services.som3d.generator import NiftiToSTLConverter
 from sqlalchemy.orm import Session
 from ..db import get_db
 from ..core.security import get_current_user, get_current_user_optional
-from ..models import JobConv, JobSTL, Paciente, Medico
+from ..models import JobConv, JobSTL, Paciente, Medico, Usuario
 from ..schemas import FinalizeJobIn, JobSTLOut, PatientJobSTLOut
 from ..core.config import mysql_url
 
@@ -572,6 +572,75 @@ async def list_my_jobs(db: Session = Depends(get_db), user = Depends(get_current
             "status": (m.status if m else jc.status),
             "phase": (m.phase if m else None),
             "percent": (m.percent if m else (100.0 if jc.status == "DONE" else 0.0)),
+            "updated_at": getattr(jc, "updated_at", None),
+        })
+    return {"jobs": items}
+
+
+@router.get("/jobs/tracking/mine")
+async def list_my_jobs_tracking(db: Session = Depends(get_db), user = Depends(get_current_user)):
+    """Seguimiento de procesamiento del usuario autenticado.
+    Fuente principal: JobConv (BD). Si existe manifest en S3, enriquece phase/percent.
+    """
+    rows = (
+        db.query(JobConv, Usuario)
+        .join(Usuario, Usuario.id_usuario == JobConv.id_usuario)
+        .filter(JobConv.id_usuario == user.id_usuario)
+        .order_by(JobConv.updated_at.desc())
+        .all()
+    )
+
+    items: List[Dict[str, Any]] = []
+    for jc, u in rows:
+        m = _load_manifest(jc.job_id)
+        status = (m.status if m else jc.status)
+        items.append({
+            "job_id": jc.job_id,
+            "status": status,
+            "phase": (m.phase if m else None),
+            "percent": (m.percent if m else (100.0 if status == "DONE" else 0.0)),
+            "is_processing": str(status).upper() in ("QUEUED", "RUNNING"),
+            "owner": {
+                "id_usuario": u.id_usuario,
+                "nombre": u.nombre,
+                "apellido": u.apellido,
+                "correo": u.correo,
+            },
+            "started_at": getattr(jc, "started_at", None),
+            "finished_at": getattr(jc, "finished_at", None),
+            "updated_at": getattr(jc, "updated_at", None),
+        })
+    return {"jobs": items}
+
+
+@router.get("/jobs/tracking")
+async def list_jobs_tracking(db: Session = Depends(get_db), user=Depends(require_admin)):
+    """Seguimiento de procesamiento global (solo admin)."""
+    rows = (
+        db.query(JobConv, Usuario)
+        .join(Usuario, Usuario.id_usuario == JobConv.id_usuario)
+        .order_by(JobConv.updated_at.desc())
+        .all()
+    )
+
+    items: List[Dict[str, Any]] = []
+    for jc, u in rows:
+        m = _load_manifest(jc.job_id)
+        status = (m.status if m else jc.status)
+        items.append({
+            "job_id": jc.job_id,
+            "status": status,
+            "phase": (m.phase if m else None),
+            "percent": (m.percent if m else (100.0 if status == "DONE" else 0.0)),
+            "is_processing": str(status).upper() in ("QUEUED", "RUNNING"),
+            "owner": {
+                "id_usuario": u.id_usuario,
+                "nombre": u.nombre,
+                "apellido": u.apellido,
+                "correo": u.correo,
+            },
+            "started_at": getattr(jc, "started_at", None),
+            "finished_at": getattr(jc, "finished_at", None),
             "updated_at": getattr(jc, "updated_at", None),
         })
     return {"jobs": items}

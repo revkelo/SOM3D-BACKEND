@@ -1,0 +1,38 @@
+# --- Web/API ---
+fastapi==0.110.0
+uvicorn[standard]==0.27.1
+python-multipart==0.0.20
+python-dotenv==1.0.1
+httpx>=0.27
+pydantic>=2.5
+email-validator>=2.1
+PyJWT>=2.8
+
+# --- Base de datos ---
+SQLAlchemy>=2.0
+PyMySQL>=1.1
+python-dateutil>=2.8
+
+# --- Sistema / utilidades ---
+psutil==5.9.8
+bcrypt>=4.0
+
+# --- S3 / cloud ---
+boto3
+
+# --- NumPy stack (evita NumPy 2.x) ---
+numpy==1.26.4
+nibabel==5.1.0
+scikit-image==0.22.0
+
+# --- DICOM ---
+pydicom==2.4.4
+dicom2nifti==2.4.10
+
+# --- STL / mallas ---
+numpy-stl==3.0.0
+vtk==9.3.0
+pymeshlab==2023.12
+
+# --- Segmentación ---
+TotalSegmentator==2.11.0

@@ -10,6 +10,7 @@ from ..schemas import (
     LoginIn,
     TokenOut,
     UserOut,
+    UserUpdateIn,
     ForgotPasswordIn,
     ResetPasswordIn,
     ConfirmCodeIn,
@@ -81,6 +82,31 @@ def login(payload: LoginIn, response: Response, db: Session = Depends(get_db)):
 
 @router.get("/me", response_model=UserOut)
 def whoami(current=Depends(get_current_user)):
+    return current
+
+
+@router.patch("/me", response_model=UserOut)
+def update_me(payload: UserUpdateIn, db: Session = Depends(get_db), current=Depends(get_current_user)):
+    data = payload.model_dump(exclude_unset=True)
+
+    if "correo" in data and data["correo"] and data["correo"] != current.correo:
+        exists = db.query(Usuario).filter(
+            Usuario.correo == data["correo"],
+            Usuario.id_usuario != current.id_usuario,
+        ).first()
+        if exists:
+            raise HTTPException(status_code=409, detail="Correo ya registrado")
+        current.correo = str(data["correo"])
+
+    if "password" in data and data["password"]:
+        current.contrasena = hash_password(data["password"])
+
+    for field in ("nombre", "apellido", "telefono", "direccion", "ciudad"):
+        if field in data and data[field] is not None:
+            setattr(current, field, data[field])
+
+    db.commit()
+    db.refresh(current)
     return current
 
 

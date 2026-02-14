@@ -25,11 +25,24 @@ class UserOut(BaseModel):
     nombre: str
     apellido: str
     correo: EmailStr
+    telefono: Optional[str] = None
+    direccion: Optional[str] = None
+    ciudad: Optional[str] = None
     rol: str
     activo: bool
 
     class Config:
         from_attributes = True
+
+
+class UserUpdateIn(BaseModel):
+    nombre: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    apellido: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    correo: Optional[EmailStr] = None
+    telefono: Optional[str] = Field(default=None, max_length=20)
+    direccion: Optional[str] = Field(default=None, max_length=255)
+    ciudad: Optional[str] = Field(default=None, max_length=100)
+    password: Optional[str] = Field(default=None, min_length=6, max_length=128)
 
 class StartSubscriptionIn(BaseModel):
     plan_id: int

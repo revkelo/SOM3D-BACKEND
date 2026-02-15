@@ -23,11 +23,41 @@ from sqlalchemy.orm import Session
 from ..db import get_db
 from ..core.security import get_current_user, get_current_user_optional
 from ..models import JobConv, JobSTL, Paciente, Medico, Usuario
-from ..schemas import FinalizeJobIn, JobSTLOut, PatientJobSTLOut
+from ..schemas import FinalizeJobIn, JobSTLOut, PatientJobSTLOut, JobSTLNoteUpdateIn
 from ..core.config import mysql_url
 
 
 router = APIRouter(prefix="/som3d", tags=["som3d"])
+
+
+def _is_admin(user: Any) -> bool:
+    return str(getattr(user, "rol", "")).upper() == "ADMINISTRADOR"
+
+
+def _ensure_job_access(db: Session, user: Any, job_id: str) -> None:
+    if _is_admin(user):
+        return
+    owner = (
+        db.query(JobConv.job_id)
+        .filter(JobConv.job_id == job_id, JobConv.id_usuario == user.id_usuario)
+        .first()
+    )
+    if not owner:
+        # Evita filtrar existencia de jobs de terceros.
+        raise HTTPException(status_code=404, detail="Job no encontrado")
+
+
+def _get_jobstl_owned(db: Session, user: Any, id_jobstl: int) -> JobSTL:
+    js = db.query(JobSTL).filter(JobSTL.id_jobstl == id_jobstl).first()
+    if not js:
+        raise HTTPException(status_code=404, detail="Caso 3D no encontrado")
+    if _is_admin(user):
+        return js
+    p = db.query(Paciente).filter(Paciente.id_paciente == js.id_paciente).first()
+    med = db.query(Medico).filter(Medico.id_usuario == user.id_usuario).first()
+    if not p or not med or p.id_medico != med.id_medico:
+        raise HTTPException(status_code=403, detail="No autorizado")
+    return js
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -421,6 +451,7 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
 @router.post("/jobs")
 async def create_job(
     file: UploadFile = File(..., description=".zip con DICOMs"),
+    nombre_proceso: Optional[str] = Form(None),
     enable_ortopedia: bool = Form(False),
     enable_appendicular: bool = Form(False),
     enable_muscles: bool = Form(False),
@@ -436,6 +467,9 @@ async def create_job(
     _require_s3_env()
     if not file.filename or not file.filename.lower().endswith(".zip"):
         raise HTTPException(status_code=400, detail="Se espera un .zip con DICOMs")
+    process_name = (nombre_proceso or "").strip()
+    if process_name and len(process_name) > 80:
+        raise HTTPException(status_code=400, detail="nombre_proceso no puede superar 80 caracteres")
 
     s3 = _ensure_s3()
     job_id = uuid.uuid4().hex
@@ -468,6 +502,7 @@ async def create_job(
         phase="totalsegmentator",
         percent=0.0,
         params={
+            "nombre_proceso": (process_name or None),
             "enable_ortopedia": enable_ortopedia,
             "enable_appendicular": enable_appendicular,
             "enable_muscles": enable_muscles,
@@ -518,6 +553,7 @@ async def create_job(
             enable_teeth=bool(teeth),
             enable_hip_implant=bool(enable_hip_implant),
             extra_tasks_json=(json.dumps(extra_list, ensure_ascii=False) if extra_list else None),
+            queue_name=(process_name or None),
         )
         db.add(jc)
         db.commit()
@@ -569,6 +605,7 @@ async def list_my_jobs(db: Session = Depends(get_db), user = Depends(get_current
         m = _load_manifest(jc.job_id)
         items.append({
             "job_id": jc.job_id,
+            "nombre_proceso": getattr(jc, "queue_name", None),
             "status": (m.status if m else jc.status),
             "phase": (m.phase if m else None),
             "percent": (m.percent if m else (100.0 if jc.status == "DONE" else 0.0)),
@@ -596,6 +633,7 @@ async def list_my_jobs_tracking(db: Session = Depends(get_db), user = Depends(ge
         status = (m.status if m else jc.status)
         items.append({
             "job_id": jc.job_id,
+            "nombre_proceso": getattr(jc, "queue_name", None),
             "status": status,
             "phase": (m.phase if m else None),
             "percent": (m.percent if m else (100.0 if status == "DONE" else 0.0)),
@@ -629,6 +667,7 @@ async def list_jobs_tracking(db: Session = Depends(get_db), user=Depends(require
         status = (m.status if m else jc.status)
         items.append({
             "job_id": jc.job_id,
+            "nombre_proceso": getattr(jc, "queue_name", None),
             "status": status,
             "phase": (m.phase if m else None),
             "percent": (m.percent if m else (100.0 if status == "DONE" else 0.0)),
@@ -647,7 +686,8 @@ async def list_jobs_tracking(db: Session = Depends(get_db), user=Depends(require
 
 
 @router.get("/jobs/{job_id}")
-async def get_job(job_id: str, user = Depends(get_current_user)):
+async def get_job(job_id: str, db: Session = Depends(get_db), user = Depends(get_current_user)):
+    _ensure_job_access(db, user, job_id)
     m = _load_manifest(job_id)
     if not m:
         raise HTTPException(status_code=404, detail="Job no encontrado")
@@ -655,7 +695,8 @@ async def get_job(job_id: str, user = Depends(get_current_user)):
 
 
 @router.get("/jobs/{job_id}/progress")
-async def get_progress(job_id: str, user = Depends(get_current_user)):
+async def get_progress(job_id: str, db: Session = Depends(get_db), user = Depends(get_current_user)):
+    _ensure_job_access(db, user, job_id)
     m = _load_manifest(job_id)
     if not m:
         raise HTTPException(status_code=404, detail="Job no encontrado")
@@ -663,7 +704,14 @@ async def get_progress(job_id: str, user = Depends(get_current_user)):
 
 
 @router.get("/jobs/{job_id}/log")
-async def get_log(job_id: str, tail: int = 200, full: bool = False, user = Depends(get_current_user)):
+async def get_log(
+    job_id: str,
+    tail: int = 200,
+    full: bool = False,
+    db: Session = Depends(get_db),
+    user = Depends(get_current_user),
+):
+    _ensure_job_access(db, user, job_id)
     # El log principal se guarda como job.log en la raíz del job.
     # Si no existe (jobs antiguos o en progreso), se intenta usar el manifest.log_tail como fallback.
     s3 = _ensure_s3()
@@ -738,7 +786,8 @@ async def get_log(job_id: str, tail: int = 200, full: bool = False, user = Depen
 
 
 @router.get("/jobs/{job_id}/stls")
-async def get_stls(job_id: str, user = Depends(get_current_user)):
+async def get_stls(job_id: str, db: Session = Depends(get_db), user = Depends(get_current_user)):
+    _ensure_job_access(db, user, job_id)
     s3 = _ensure_s3()
     base1 = s3.join_key(s3.cfg.prefix or "", job_id)
     base2 = s3.join_key(base1, RESULT_SUBDIR)
@@ -771,7 +820,13 @@ async def get_stls(job_id: str, user = Depends(get_current_user)):
 
 
 @router.get("/jobs/{job_id}/result")
-async def get_result(job_id: str, expires: int = 3600, user = Depends(get_current_user)):
+async def get_result(
+    job_id: str,
+    expires: int = 3600,
+    db: Session = Depends(get_db),
+    user = Depends(get_current_user),
+):
+    _ensure_job_access(db, user, job_id)
     s3 = _ensure_s3()
     m = _load_manifest(job_id)
     if not m:
@@ -791,6 +846,7 @@ async def get_result(job_id: str, expires: int = 3600, user = Depends(get_curren
 
 @router.post("/jobs/{job_id}/finalize", response_model=JobSTLOut)
 async def finalize_job(job_id: str, payload: FinalizeJobIn, db: Session = Depends(get_db), user = Depends(get_current_user)):
+    _ensure_job_access(db, user, job_id)
     # Optionally mark JobConv as DONE and create JobSTL linked to a Paciente
     # Validate paciente ownership if medico
     med = db.query(Medico).filter(Medico.id_usuario == user.id_usuario).first()
@@ -814,7 +870,23 @@ async def finalize_job(job_id: str, payload: FinalizeJobIn, db: Session = Depend
         id_paciente=payload.id_paciente,
         stl_size=payload.stl_size,
         num_stl_archivos=payload.num_stl_archivos,
+        notas=payload.notas,
     )
+    db.add(js)
+    db.commit()
+    db.refresh(js)
+    return js
+
+
+@router.patch("/jobstl/{id_jobstl}/notes", response_model=JobSTLOut)
+async def update_jobstl_notes(
+    id_jobstl: int,
+    payload: JobSTLNoteUpdateIn,
+    db: Session = Depends(get_db),
+    user = Depends(get_current_user),
+):
+    js = _get_jobstl_owned(db, user, id_jobstl)
+    js.notas = payload.notas
     db.add(js)
     db.commit()
     db.refresh(js)
@@ -939,16 +1011,22 @@ def patients_with_stl(db: Session = Depends(get_db), user=Depends(get_current_us
             nombres=getattr(p, "nombres", None),
             apellidos=getattr(p, "apellidos", None),
             doc_numero=getattr(p, "doc_numero", None),
+            notas=getattr(js, "notas", None),
             created_at=str(getattr(js, "created_at", "")) if getattr(js, "created_at", None) else None,
         ))
     return out
 
 
 @router.get("/jobs/{job_id}/result/bytes")
-async def download_result_zip_bytes(job_id: str):
+async def download_result_zip_bytes(
+    job_id: str,
+    db: Session = Depends(get_db),
+    user = Depends(get_current_user),
+):
     """Descarga el ZIP de resultados desde S3 y lo devuelve en la misma
     respuesta, para evitar problemas de CORS con URLs presignadas.
     """
+    _ensure_job_access(db, user, job_id)
     s3 = _ensure_s3()
     key = _s3_key(job_id, RESULT_ZIP)
     if not s3.exists(key):

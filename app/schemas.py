@@ -10,7 +10,8 @@ class RegisterIn(BaseModel):
     telefono: Optional[str] = None
     direccion: Optional[str] = None
     ciudad: Optional[str] = None
-    rol: Literal["ADMINISTRADOR", "MEDICO"] = "MEDICO"
+    # El registro público solo permite cuentas MEDICO.
+    rol: Literal["MEDICO"] = "MEDICO"
 
 class LoginIn(BaseModel):
     correo: EmailStr
@@ -234,6 +235,13 @@ class EstudioIn(BaseModel):
     modalidad: Optional[str] = Field(default=None, max_length=20)
     fecha_estudio: Optional[datetime] = None
     descripcion: Optional[str] = Field(default=None, max_length=200)
+    notas: Optional[str] = None
+
+class EstudioUpdateIn(BaseModel):
+    modalidad: Optional[str] = Field(default=None, max_length=20)
+    fecha_estudio: Optional[datetime] = None
+    descripcion: Optional[str] = Field(default=None, max_length=200)
+    notas: Optional[str] = None
 
 class EstudioOut(BaseModel):
     id_estudio: int
@@ -242,6 +250,7 @@ class EstudioOut(BaseModel):
     modalidad: Optional[str]
     fecha_estudio: datetime
     descripcion: Optional[str]
+    notas: Optional[str]
 
     class Config:
         from_attributes = True
@@ -272,6 +281,7 @@ class FinalizeJobIn(BaseModel):
     id_paciente: int
     stl_size: Optional[int] = None
     num_stl_archivos: Optional[int] = None
+    notas: Optional[str] = None
 
 class JobSTLOut(BaseModel):
     id_jobstl: int
@@ -279,6 +289,7 @@ class JobSTLOut(BaseModel):
     id_paciente: int
     stl_size: Optional[int]
     num_stl_archivos: Optional[int]
+    notas: Optional[str]
     created_at: Optional[str]
     updated_at: Optional[str]
 
@@ -344,7 +355,11 @@ class PatientJobSTLOut(BaseModel):
     nombres: Optional[str] = None
     apellidos: Optional[str] = None
     doc_numero: Optional[str] = None
+    notas: Optional[str] = None
     created_at: Optional[str] = None
+
+class JobSTLNoteUpdateIn(BaseModel):
+    notas: Optional[str] = None
 
 
 

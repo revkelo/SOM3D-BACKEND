@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from ..db import get_db
 from ..core.security import get_current_user
 from ..models import Estudio, Paciente, Medico, Usuario
-from ..schemas import EstudioIn, EstudioOut
+from ..schemas import EstudioIn, EstudioOut, EstudioUpdateIn
 
 router = APIRouter()
 
@@ -32,6 +32,7 @@ def create_study(payload: EstudioIn, db: Session = Depends(get_db), user=Depends
         modalidad=payload.modalidad,
         fecha_estudio=payload.fecha_estudio or None,
         descripcion=payload.descripcion,
+        notas=payload.notas,
     )
     db.add(e)
     try:
@@ -73,5 +74,27 @@ def get_study(estudio_id: int, db: Session = Depends(get_db), user=Depends(get_c
         med = db.query(Medico).filter(Medico.id_usuario == user.id_usuario).first()
         if not med or med.id_medico != e.id_medico:
             raise HTTPException(status_code=403, detail="No autorizado")
+    return e
+
+
+@router.patch("/studies/{estudio_id}", response_model=EstudioOut)
+def update_study(
+    estudio_id: int,
+    payload: EstudioUpdateIn,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    e = db.query(Estudio).filter(Estudio.id_estudio == estudio_id).first()
+    if not e:
+        raise HTTPException(status_code=404, detail="Estudio no encontrado")
+    _owned_or_admin(db, user, e.id_paciente)
+
+    data = payload.model_dump(exclude_unset=True)
+    for k, v in data.items():
+        setattr(e, k, v)
+
+    db.add(e)
+    db.commit()
+    db.refresh(e)
     return e
 

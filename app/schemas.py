@@ -296,7 +296,7 @@ class JobConvOut(BaseModel):
         from_attributes = True
 
 class FinalizeJobIn(BaseModel):
-    id_paciente: int
+    id_paciente: Optional[int] = None
     stl_size: Optional[int] = None
     num_stl_archivos: Optional[int] = None
     notas: Optional[str] = None
@@ -304,7 +304,7 @@ class FinalizeJobIn(BaseModel):
 class JobSTLOut(BaseModel):
     id_jobstl: int
     job_id: str
-    id_paciente: int
+    id_paciente: Optional[int] = None
     stl_size: Optional[int]
     num_stl_archivos: Optional[int]
     notas: Optional[str]
@@ -380,7 +380,7 @@ class AdminCreateIn(BaseModel):
 class PatientJobSTLOut(BaseModel):
     id_jobstl: int
     job_id: str
-    id_paciente: int
+    id_paciente: Optional[int] = None
     nombres: Optional[str] = None
     apellidos: Optional[str] = None
     doc_numero: Optional[str] = None

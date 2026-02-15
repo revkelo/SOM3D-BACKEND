@@ -136,7 +136,7 @@ class JobSTL(Base):
     __tablename__ = "JobSTL"
     id_jobstl: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     job_id: Mapped[str] = mapped_column(ForeignKey("JobConv.job_id"), nullable=False)
-    id_paciente: Mapped[int] = mapped_column(ForeignKey("Paciente.id_paciente"), nullable=False)
+    id_paciente: Mapped[int | None] = mapped_column(ForeignKey("Paciente.id_paciente"), nullable=True)
     stl_size: Mapped[int | None] = mapped_column(BigInteger)
     num_stl_archivos: Mapped[int | None] = mapped_column(Integer)
     notas: Mapped[str | None] = mapped_column(Text)

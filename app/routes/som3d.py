@@ -53,6 +53,8 @@ def _get_jobstl_owned(db: Session, user: Any, id_jobstl: int) -> JobSTL:
         raise HTTPException(status_code=404, detail="Caso 3D no encontrado")
     if _is_admin(user):
         return js
+    if js.id_paciente is None:
+        raise HTTPException(status_code=403, detail="No autorizado")
     p = db.query(Paciente).filter(Paciente.id_paciente == js.id_paciente).first()
     med = db.query(Medico).filter(Medico.id_usuario == user.id_usuario).first()
     if not p or not med or p.id_medico != med.id_medico:
@@ -423,10 +425,10 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
             except Exception:
                 pass
 
-            # Registrar JobSTL en BD si hay db_url y un paciente asociado en params
+            # Registrar JobSTL en BD (con o sin paciente)
             try:
                 pid = params.get("id_paciente") if isinstance(params, dict) else None
-                if db_url and pid:
+                if db_url:
                     engine = create_engine(db_url, pool_pre_ping=True, future=True)
                     with engine.begin() as conn:
                         conn.execute(
@@ -436,7 +438,7 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
                             ),
                             {
                                 "job_id": job_id,
-                                "id_paciente": int(pid),
+                                "id_paciente": (int(pid) if pid is not None else None),
                                 "stl_size": int(stl_zip_size),
                                 "num": int(stl_count),
                             },
@@ -851,6 +853,8 @@ async def finalize_job(job_id: str, payload: FinalizeJobIn, db: Session = Depend
     # Validate paciente ownership if medico
     med = db.query(Medico).filter(Medico.id_usuario == user.id_usuario).first()
     if med is not None:
+        if payload.id_paciente is None:
+            raise HTTPException(status_code=400, detail="id_paciente es obligatorio para medico")
         p = db.query(Paciente).filter(Paciente.id_paciente == payload.id_paciente).first()
         if not p or p.id_medico != med.id_medico:
             raise HTTPException(status_code=403, detail="Paciente no pertenece al medico")
@@ -995,12 +999,12 @@ def patients_with_stl(db: Session = Depends(get_db), user=Depends(get_current_us
     - Médico: solo sus pacientes
     Devuelve id_jobstl, job_id, id_paciente y datos básicos del paciente.
     """
-    q = db.query(JobSTL, Paciente).join(Paciente, JobSTL.id_paciente == Paciente.id_paciente)
+    q = db.query(JobSTL, Paciente).outerjoin(Paciente, JobSTL.id_paciente == Paciente.id_paciente)
     if getattr(user, "rol", None) != "ADMINISTRADOR":
         med = db.query(Medico).filter(Medico.id_usuario == user.id_usuario).first()
         if not med:
             return []
-        q = q.filter(Paciente.id_medico == med.id_medico)
+        q = q.filter(JobSTL.id_paciente.isnot(None), Paciente.id_medico == med.id_medico)
     rows = q.order_by(JobSTL.created_at.desc()).all()
     out: list[PatientJobSTLOut] = []
     for js, p in rows:

@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 from ..db import get_db
 from ..core.security import get_current_user, get_current_user_optional
 from ..models import JobConv, JobSTL, Paciente, Medico, Usuario
-from ..schemas import FinalizeJobIn, JobSTLOut, PatientJobSTLOut
+from ..schemas import FinalizeJobIn, JobSTLOut, PatientJobSTLOut, JobSTLNoteUpdateIn
 from ..core.config import mysql_url
 
 
@@ -45,6 +45,19 @@ def _ensure_job_access(db: Session, user: Any, job_id: str) -> None:
     if not owner:
         # Evita filtrar existencia de jobs de terceros.
         raise HTTPException(status_code=404, detail="Job no encontrado")
+
+
+def _get_jobstl_owned(db: Session, user: Any, id_jobstl: int) -> JobSTL:
+    js = db.query(JobSTL).filter(JobSTL.id_jobstl == id_jobstl).first()
+    if not js:
+        raise HTTPException(status_code=404, detail="Caso 3D no encontrado")
+    if _is_admin(user):
+        return js
+    p = db.query(Paciente).filter(Paciente.id_paciente == js.id_paciente).first()
+    med = db.query(Medico).filter(Medico.id_usuario == user.id_usuario).first()
+    if not p or not med or p.id_medico != med.id_medico:
+        raise HTTPException(status_code=403, detail="No autorizado")
+    return js
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -438,6 +451,7 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
 @router.post("/jobs")
 async def create_job(
     file: UploadFile = File(..., description=".zip con DICOMs"),
+    nombre_proceso: Optional[str] = Form(None),
     enable_ortopedia: bool = Form(False),
     enable_appendicular: bool = Form(False),
     enable_muscles: bool = Form(False),
@@ -453,6 +467,9 @@ async def create_job(
     _require_s3_env()
     if not file.filename or not file.filename.lower().endswith(".zip"):
         raise HTTPException(status_code=400, detail="Se espera un .zip con DICOMs")
+    process_name = (nombre_proceso or "").strip()
+    if process_name and len(process_name) > 80:
+        raise HTTPException(status_code=400, detail="nombre_proceso no puede superar 80 caracteres")
 
     s3 = _ensure_s3()
     job_id = uuid.uuid4().hex
@@ -485,6 +502,7 @@ async def create_job(
         phase="totalsegmentator",
         percent=0.0,
         params={
+            "nombre_proceso": (process_name or None),
             "enable_ortopedia": enable_ortopedia,
             "enable_appendicular": enable_appendicular,
             "enable_muscles": enable_muscles,
@@ -535,6 +553,7 @@ async def create_job(
             enable_teeth=bool(teeth),
             enable_hip_implant=bool(enable_hip_implant),
             extra_tasks_json=(json.dumps(extra_list, ensure_ascii=False) if extra_list else None),
+            queue_name=(process_name or None),
         )
         db.add(jc)
         db.commit()
@@ -586,6 +605,7 @@ async def list_my_jobs(db: Session = Depends(get_db), user = Depends(get_current
         m = _load_manifest(jc.job_id)
         items.append({
             "job_id": jc.job_id,
+            "nombre_proceso": getattr(jc, "queue_name", None),
             "status": (m.status if m else jc.status),
             "phase": (m.phase if m else None),
             "percent": (m.percent if m else (100.0 if jc.status == "DONE" else 0.0)),
@@ -613,6 +633,7 @@ async def list_my_jobs_tracking(db: Session = Depends(get_db), user = Depends(ge
         status = (m.status if m else jc.status)
         items.append({
             "job_id": jc.job_id,
+            "nombre_proceso": getattr(jc, "queue_name", None),
             "status": status,
             "phase": (m.phase if m else None),
             "percent": (m.percent if m else (100.0 if status == "DONE" else 0.0)),
@@ -646,6 +667,7 @@ async def list_jobs_tracking(db: Session = Depends(get_db), user=Depends(require
         status = (m.status if m else jc.status)
         items.append({
             "job_id": jc.job_id,
+            "nombre_proceso": getattr(jc, "queue_name", None),
             "status": status,
             "phase": (m.phase if m else None),
             "percent": (m.percent if m else (100.0 if status == "DONE" else 0.0)),
@@ -848,7 +870,23 @@ async def finalize_job(job_id: str, payload: FinalizeJobIn, db: Session = Depend
         id_paciente=payload.id_paciente,
         stl_size=payload.stl_size,
         num_stl_archivos=payload.num_stl_archivos,
+        notas=payload.notas,
     )
+    db.add(js)
+    db.commit()
+    db.refresh(js)
+    return js
+
+
+@router.patch("/jobstl/{id_jobstl}/notes", response_model=JobSTLOut)
+async def update_jobstl_notes(
+    id_jobstl: int,
+    payload: JobSTLNoteUpdateIn,
+    db: Session = Depends(get_db),
+    user = Depends(get_current_user),
+):
+    js = _get_jobstl_owned(db, user, id_jobstl)
+    js.notas = payload.notas
     db.add(js)
     db.commit()
     db.refresh(js)
@@ -973,6 +1011,7 @@ def patients_with_stl(db: Session = Depends(get_db), user=Depends(get_current_us
             nombres=getattr(p, "nombres", None),
             apellidos=getattr(p, "apellidos", None),
             doc_numero=getattr(p, "doc_numero", None),
+            notas=getattr(js, "notas", None),
             created_at=str(getattr(js, "created_at", "")) if getattr(js, "created_at", None) else None,
         ))
     return out

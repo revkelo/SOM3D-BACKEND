@@ -4,7 +4,7 @@ from sqlalchemy import func
 
 from ..db import get_db
 from ..core.security import get_current_user, hash_password
-from ..models import Usuario, Medico, Hospital, Suscripcion, Pago, Paciente, Estudio, VisorEstado, JobSTL, JobConv
+from ..models import Usuario, Medico, Hospital, Suscripcion, Pago, Paciente, Estudio, VisorEstado, JobSTL, JobConv, Mensaje
 from ..schemas import DoctorIn, DoctorUpdateIn, DoctorOut
 
 
@@ -185,6 +185,7 @@ def delete_doctor(id_medico: int, db: Session = Depends(get_db), user=Depends(ge
     p_ids = [row[0] for row in db.query(Paciente.id_paciente).filter(Paciente.id_medico == id_medico).all()]
 
     if p_ids:
+        db.query(Mensaje).filter((Mensaje.id_medico == id_medico) | (Mensaje.id_paciente.in_(p_ids))).delete(synchronize_session=False)
         # VisorEstado primero (depende de Paciente y JobSTL)
         db.query(VisorEstado).filter((VisorEstado.id_medico == id_medico) | (VisorEstado.id_paciente.in_(p_ids))).delete(synchronize_session=False)
         # Estudio por paciente o por médico
@@ -194,6 +195,7 @@ def delete_doctor(id_medico: int, db: Session = Depends(get_db), user=Depends(ge
         # Pacientes
         db.query(Paciente).filter(Paciente.id_paciente.in_(p_ids)).delete(synchronize_session=False)
     else:
+        db.query(Mensaje).filter(Mensaje.id_medico == id_medico).delete(synchronize_session=False)
         # Aún así limpiar VisorEstado y Estudio por médico
         db.query(VisorEstado).filter(VisorEstado.id_medico == id_medico).delete(synchronize_session=False)
         db.query(Estudio).filter(Estudio.id_medico == id_medico).delete(synchronize_session=False)

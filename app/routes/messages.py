@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 # ⬇️ Usa tu modelo real. Si tu tabla es MensajeSistema, alíasalo como Mensaje:
-from ..models import Mensaje as Mensaje, Medico
+from ..models import Mensaje as Mensaje, Medico, Usuario
 from ..schemas import MensajeOut, MensajeList
 from ..core.security import get_current_user
 
@@ -33,6 +33,12 @@ def _get_current_medico(db: Session, user_id: int) -> Medico:
     if not medico:
         raise HTTPException(status_code=403, detail="Solo médicos pueden usar mensajería")
     return medico
+
+
+def _ensure_admin(current_user: Any):
+    rol = (current_user.get("rol") if isinstance(current_user, dict) else getattr(current_user, "rol", None)) or ""
+    if str(rol).upper() != "ADMINISTRADOR":
+        raise HTTPException(status_code=403, detail="Requiere rol ADMINISTRADOR")
 
 # ---------------------------
 # Crear mensaje (FormData)
@@ -140,6 +146,106 @@ def marcar_leido(
         raise HTTPException(status_code=404, detail="Mensaje no encontrado")
 
     m.leido_medico = bool(body.leido_medico)
+    if hasattr(Mensaje, "actualizado_en"):
+        m.actualizado_en = datetime.utcnow()
+    db.commit()
+    return {"ok": True}
+
+
+class AdminMensajeUpdateIn(BaseModel):
+    estado: Optional[Literal["nuevo", "analisis", "en_curso", "resuelto"]] = None
+    respuesta_admin: Optional[str] = None
+    leido_admin: Optional[bool] = None
+
+
+@router.get("/admin/inbox")
+def admin_listar_mensajes(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
+    tipo: Optional[str] = Query(None),
+    estado: Optional[str] = Query(None),
+    severidad: Optional[str] = Query(None),
+    q: Optional[str] = Query(None, description="Buscar por titulo/descripcion/correo"),
+    only_unread: bool = Query(False),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    _ensure_admin(current_user)
+
+    qry = (
+        db.query(Mensaje, Medico, Usuario)
+        .join(Medico, Medico.id_medico == Mensaje.id_medico)
+        .join(Usuario, Usuario.id_usuario == Medico.id_usuario)
+    )
+    if tipo:
+        qry = qry.filter(Mensaje.tipo == tipo)
+    if estado:
+        qry = qry.filter(Mensaje.estado == estado)
+    if severidad:
+        qry = qry.filter(Mensaje.severidad == severidad)
+    if only_unread:
+        qry = qry.filter(Mensaje.leido_admin == False)
+    if q:
+        like = f"%{q}%"
+        qry = qry.filter(
+            (Mensaje.titulo.ilike(like))
+            | (Mensaje.descripcion.ilike(like))
+            | (Usuario.correo.ilike(like))
+        )
+
+    total = qry.count()
+    rows = (
+        qry.order_by(Mensaje.actualizado_en.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+
+    items = []
+    for msg, med, usr in rows:
+        items.append({
+            "id_mensaje": msg.id_mensaje,
+            "id_medico": msg.id_medico,
+            "id_paciente": msg.id_paciente,
+            "tipo": msg.tipo,
+            "titulo": msg.titulo,
+            "descripcion": msg.descripcion,
+            "severidad": msg.severidad,
+            "adjunto_url": msg.adjunto_url,
+            "estado": msg.estado,
+            "respuesta_admin": msg.respuesta_admin,
+            "leido_admin": bool(msg.leido_admin),
+            "leido_medico": bool(msg.leido_medico),
+            "creado_en": msg.creado_en,
+            "actualizado_en": msg.actualizado_en,
+            "emisor": {
+                "id_medico": med.id_medico,
+                "id_usuario": usr.id_usuario,
+                "nombre": usr.nombre,
+                "apellido": usr.apellido,
+                "correo": usr.correo,
+            },
+        })
+    return {"total": total, "items": items}
+
+
+@router.patch("/admin/inbox/{id_mensaje}")
+def admin_actualizar_mensaje(
+    id_mensaje: int,
+    body: AdminMensajeUpdateIn,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    _ensure_admin(current_user)
+    m = db.query(Mensaje).filter(Mensaje.id_mensaje == id_mensaje).first()
+    if not m:
+        raise HTTPException(status_code=404, detail="Mensaje no encontrado")
+
+    data = body.model_dump(exclude_unset=True)
+    for field in ("estado", "respuesta_admin", "leido_admin"):
+        if field in data:
+            setattr(m, field, data[field])
+
     if hasattr(Mensaje, "actualizado_en"):
         m.actualizado_en = datetime.utcnow()
     db.commit()

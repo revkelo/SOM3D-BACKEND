@@ -144,6 +144,24 @@ class SubscriptionOut(BaseModel):
 class SubscriptionUpdateIn(BaseModel):
     estado: Literal["ACTIVA", "PAUSADA"]
 
+
+class SubscriptionAdminCreateIn(BaseModel):
+    id_medico: Optional[int] = None
+    id_hospital: Optional[int] = None
+    id_plan: int
+    estado: Literal["ACTIVA", "PAUSADA"] = "PAUSADA"
+    fecha_inicio: Optional[datetime] = None
+    fecha_expiracion: Optional[datetime] = None
+
+
+class SubscriptionAdminUpdateIn(BaseModel):
+    id_medico: Optional[int] = None
+    id_hospital: Optional[int] = None
+    id_plan: Optional[int] = None
+    estado: Optional[Literal["ACTIVA", "PAUSADA"]] = None
+    fecha_inicio: Optional[datetime] = None
+    fecha_expiracion: Optional[datetime] = None
+
 class PaymentOut(BaseModel):
     id_pago: int
     id_suscripcion: int
@@ -343,6 +361,17 @@ class DoctorOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class AdminCreateIn(BaseModel):
+    nombre: str = Field(min_length=1, max_length=100)
+    apellido: str = Field(min_length=1, max_length=100)
+    correo: EmailStr
+    password: str = Field(min_length=6, max_length=128)
+    telefono: Optional[str] = Field(default=None, max_length=20)
+    direccion: Optional[str] = Field(default=None, max_length=255)
+    ciudad: Optional[str] = Field(default=None, max_length=100)
+    activo: Optional[bool] = True
 
 
 # --------------------

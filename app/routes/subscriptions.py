@@ -6,8 +6,16 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..core.security import get_current_user
-from ..models import Plan, Suscripcion, Medico, Pago
-from ..schemas import StartSubscriptionIn, CheckoutOut, SubscriptionOut, SubscriptionUpdateIn, PaymentOut
+from ..models import Plan, Suscripcion, Medico, Pago, Hospital
+from ..schemas import (
+    StartSubscriptionIn,
+    CheckoutOut,
+    SubscriptionOut,
+    SubscriptionUpdateIn,
+    SubscriptionAdminCreateIn,
+    SubscriptionAdminUpdateIn,
+    PaymentOut,
+)
 from ..core.config import EPAYCO_PUBLIC_KEY, EPAYCO_TEST, BASE_URL
 
 router = APIRouter()
@@ -206,6 +214,20 @@ def _ensure_admin(user):
         raise HTTPException(status_code=403, detail="Requiere rol ADMINISTRADOR")
 
 
+def _validate_subscription_owner(id_medico: int | None, id_hospital: int | None):
+    if (id_medico is None and id_hospital is None) or (id_medico is not None and id_hospital is not None):
+        raise HTTPException(status_code=400, detail="Debe existir exactamente un pagador: id_medico o id_hospital")
+
+
+def _validate_subscription_refs(db: Session, id_medico: int | None, id_hospital: int | None, id_plan: int):
+    if id_medico is not None and not db.query(Medico).filter(Medico.id_medico == id_medico).first():
+        raise HTTPException(status_code=404, detail="Medico no encontrado")
+    if id_hospital is not None and not db.query(Hospital).filter(Hospital.id_hospital == id_hospital).first():
+        raise HTTPException(status_code=404, detail="Hospital no encontrado")
+    if not db.query(Plan).filter(Plan.id_plan == id_plan).first():
+        raise HTTPException(status_code=404, detail="Plan no encontrado")
+
+
 @router.get("/subscriptions", response_model=list[SubscriptionOut])
 def list_subscriptions(
     db: Session = Depends(get_db),
@@ -226,6 +248,30 @@ def list_subscriptions(
     return q.order_by(Suscripcion.creado_en.desc()).all()
 
 
+@router.post("/subscriptions", response_model=SubscriptionOut, status_code=201)
+def create_subscription_admin(
+    payload: SubscriptionAdminCreateIn,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    _ensure_admin(user)
+    _validate_subscription_owner(payload.id_medico, payload.id_hospital)
+    _validate_subscription_refs(db, payload.id_medico, payload.id_hospital, payload.id_plan)
+
+    sus = Suscripcion(
+        id_medico=payload.id_medico,
+        id_hospital=payload.id_hospital,
+        id_plan=payload.id_plan,
+        estado=payload.estado,
+        fecha_inicio=payload.fecha_inicio or datetime.utcnow(),
+        fecha_expiracion=payload.fecha_expiracion,
+    )
+    db.add(sus)
+    db.commit()
+    db.refresh(sus)
+    return sus
+
+
 @router.get("/subscriptions/{suscripcion_id}", response_model=SubscriptionOut)
 def get_subscription(suscripcion_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
     _ensure_admin(user)
@@ -238,7 +284,7 @@ def get_subscription(suscripcion_id: int, db: Session = Depends(get_db), user=De
 @router.patch("/subscriptions/{suscripcion_id}", response_model=SubscriptionOut)
 def update_subscription(
     suscripcion_id: int,
-    payload: SubscriptionUpdateIn,
+    payload: SubscriptionAdminUpdateIn,
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
@@ -248,17 +294,29 @@ def update_subscription(
         raise HTTPException(status_code=404, detail="Suscripcion no encontrada")
 
     # Si se va a activar, verificar que no exista otra ACTIVA para el mismo médico
-    if payload.estado == "ACTIVA":
+    data = payload.model_dump(exclude_unset=True)
+    new_id_medico = data["id_medico"] if "id_medico" in data else sus.id_medico
+    new_id_hospital = data["id_hospital"] if "id_hospital" in data else sus.id_hospital
+    new_id_plan = data["id_plan"] if "id_plan" in data else sus.id_plan
+    new_estado = data["estado"] if "estado" in data else sus.estado
+
+    _validate_subscription_owner(new_id_medico, new_id_hospital)
+    _validate_subscription_refs(db, new_id_medico, new_id_hospital, new_id_plan)
+
+    if new_estado == "ACTIVA":
         conflict_q = db.query(Suscripcion).filter(
             Suscripcion.estado == "ACTIVA",
             Suscripcion.id_suscripcion != sus.id_suscripcion,
         )
-        if sus.id_medico is not None:
-            conflict_q = conflict_q.filter(Suscripcion.id_medico == sus.id_medico)
+        if new_id_medico is not None:
+            conflict_q = conflict_q.filter(Suscripcion.id_medico == new_id_medico)
+        if new_id_hospital is not None:
+            conflict_q = conflict_q.filter(Suscripcion.id_hospital == new_id_hospital)
         if conflict_q.first():
             raise HTTPException(status_code=409, detail="Ya existe otra suscripcion ACTIVA para este titular")
 
-    sus.estado = payload.estado
+    for k, v in data.items():
+        setattr(sus, k, v)
     db.commit()
     db.refresh(sus)
     return sus

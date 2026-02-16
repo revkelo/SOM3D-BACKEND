@@ -10,7 +10,8 @@ class RegisterIn(BaseModel):
     telefono: Optional[str] = None
     direccion: Optional[str] = None
     ciudad: Optional[str] = None
-    rol: Literal["ADMINISTRADOR", "MEDICO"] = "MEDICO"
+    # El registro público solo permite cuentas MEDICO.
+    rol: Literal["MEDICO"] = "MEDICO"
 
 class LoginIn(BaseModel):
     correo: EmailStr
@@ -143,6 +144,24 @@ class SubscriptionOut(BaseModel):
 class SubscriptionUpdateIn(BaseModel):
     estado: Literal["ACTIVA", "PAUSADA"]
 
+
+class SubscriptionAdminCreateIn(BaseModel):
+    id_medico: Optional[int] = None
+    id_hospital: Optional[int] = None
+    id_plan: int
+    estado: Literal["ACTIVA", "PAUSADA"] = "PAUSADA"
+    fecha_inicio: Optional[datetime] = None
+    fecha_expiracion: Optional[datetime] = None
+
+
+class SubscriptionAdminUpdateIn(BaseModel):
+    id_medico: Optional[int] = None
+    id_hospital: Optional[int] = None
+    id_plan: Optional[int] = None
+    estado: Optional[Literal["ACTIVA", "PAUSADA"]] = None
+    fecha_inicio: Optional[datetime] = None
+    fecha_expiracion: Optional[datetime] = None
+
 class PaymentOut(BaseModel):
     id_pago: int
     id_suscripcion: int
@@ -234,6 +253,13 @@ class EstudioIn(BaseModel):
     modalidad: Optional[str] = Field(default=None, max_length=20)
     fecha_estudio: Optional[datetime] = None
     descripcion: Optional[str] = Field(default=None, max_length=200)
+    notas: Optional[str] = None
+
+class EstudioUpdateIn(BaseModel):
+    modalidad: Optional[str] = Field(default=None, max_length=20)
+    fecha_estudio: Optional[datetime] = None
+    descripcion: Optional[str] = Field(default=None, max_length=200)
+    notas: Optional[str] = None
 
 class EstudioOut(BaseModel):
     id_estudio: int
@@ -242,6 +268,7 @@ class EstudioOut(BaseModel):
     modalidad: Optional[str]
     fecha_estudio: datetime
     descripcion: Optional[str]
+    notas: Optional[str]
 
     class Config:
         from_attributes = True
@@ -269,16 +296,18 @@ class JobConvOut(BaseModel):
         from_attributes = True
 
 class FinalizeJobIn(BaseModel):
-    id_paciente: int
+    id_paciente: Optional[int] = None
     stl_size: Optional[int] = None
     num_stl_archivos: Optional[int] = None
+    notas: Optional[str] = None
 
 class JobSTLOut(BaseModel):
     id_jobstl: int
     job_id: str
-    id_paciente: int
+    id_paciente: Optional[int] = None
     stl_size: Optional[int]
     num_stl_archivos: Optional[int]
+    notas: Optional[str]
     created_at: Optional[str]
     updated_at: Optional[str]
 
@@ -334,17 +363,32 @@ class DoctorOut(BaseModel):
         from_attributes = True
 
 
+class AdminCreateIn(BaseModel):
+    nombre: str = Field(min_length=1, max_length=100)
+    apellido: str = Field(min_length=1, max_length=100)
+    correo: EmailStr
+    password: str = Field(min_length=6, max_length=128)
+    telefono: Optional[str] = Field(default=None, max_length=20)
+    direccion: Optional[str] = Field(default=None, max_length=255)
+    ciudad: Optional[str] = Field(default=None, max_length=100)
+    activo: Optional[bool] = True
+
+
 # --------------------
 # Som3D: Pacientes con STL
 # --------------------
 class PatientJobSTLOut(BaseModel):
     id_jobstl: int
     job_id: str
-    id_paciente: int
+    id_paciente: Optional[int] = None
     nombres: Optional[str] = None
     apellidos: Optional[str] = None
     doc_numero: Optional[str] = None
+    notas: Optional[str] = None
     created_at: Optional[str] = None
+
+class JobSTLNoteUpdateIn(BaseModel):
+    notas: Optional[str] = None
 
 
 

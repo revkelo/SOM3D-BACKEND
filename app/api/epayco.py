@@ -135,6 +135,17 @@ async def _epayco_confirmation_impl(method: str, request: Request, db: Session) 
     if firma_ok and estado == "APROBADO" and x_extra1:
         sus = db.query(Suscripcion).filter(Suscripcion.id_suscripcion == int(x_extra1)).first()
         if sus:
+            existing_pago = db.query(Pago).filter(Pago.referencia_epayco == x_ref_payco).first()
+            if existing_pago:
+                PROCESADOS.add(x_ref_payco)
+                return JSONResponse({
+                    "ok": True,
+                    "duplicado": True,
+                    "firma_valida": True,
+                    "estado": estado,
+                    "ref": x_ref_payco,
+                    "suscripcion": x_extra1,
+                })
             pago = Pago(
                 id_suscripcion=sus.id_suscripcion,
                 referencia_epayco=x_ref_payco,

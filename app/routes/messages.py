@@ -34,8 +34,9 @@ def _get_current_medico(db: Session, user_id: int) -> Medico:
         raise HTTPException(status_code=403, detail="Solo médicos pueden usar mensajería")
     return medico
 
-def _ensure_admin(current_user: Any) -> None:
-    rol = getattr(current_user, "rol", None)
+
+def _ensure_admin(current_user: Any):
+    rol = (current_user.get("rol") if isinstance(current_user, dict) else getattr(current_user, "rol", None)) or ""
     if str(rol).upper() != "ADMINISTRADOR":
         raise HTTPException(status_code=403, detail="Requiere rol ADMINISTRADOR")
 
@@ -151,108 +152,101 @@ def marcar_leido(
     return {"ok": True}
 
 
-# ---------------------------
-# Admin: listar mensajes
-# ---------------------------
-@router.get("/admin")
-def listar_mensajes_admin(
+class AdminMensajeUpdateIn(BaseModel):
+    estado: Optional[Literal["nuevo", "analisis", "en_curso", "resuelto"]] = None
+    respuesta_admin: Optional[str] = None
+    leido_admin: Optional[bool] = None
+
+
+@router.get("/admin/inbox")
+def admin_listar_mensajes(
     page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
+    page_size: int = Query(20, ge=1, le=200),
     tipo: Optional[str] = Query(None),
     estado: Optional[str] = Query(None),
-    leido_admin: Optional[bool] = Query(None),
+    severidad: Optional[str] = Query(None),
+    q: Optional[str] = Query(None, description="Buscar por titulo/descripcion/correo"),
+    only_unread: bool = Query(False),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
     _ensure_admin(current_user)
 
-    q = db.query(Mensaje)
+    qry = (
+        db.query(Mensaje, Medico, Usuario)
+        .join(Medico, Medico.id_medico == Mensaje.id_medico)
+        .join(Usuario, Usuario.id_usuario == Medico.id_usuario)
+    )
     if tipo:
-        q = q.filter(Mensaje.tipo == tipo)
+        qry = qry.filter(Mensaje.tipo == tipo)
     if estado:
-        q = q.filter(Mensaje.estado == estado)
-    if leido_admin is not None:
-        q = q.filter(Mensaje.leido_admin == bool(leido_admin))
+        qry = qry.filter(Mensaje.estado == estado)
+    if severidad:
+        qry = qry.filter(Mensaje.severidad == severidad)
+    if only_unread:
+        qry = qry.filter(Mensaje.leido_admin == False)
+    if q:
+        like = f"%{q}%"
+        qry = qry.filter(
+            (Mensaje.titulo.ilike(like))
+            | (Mensaje.descripcion.ilike(like))
+            | (Usuario.correo.ilike(like))
+        )
 
-    total = q.count()
-    items = (
-        q.order_by(Mensaje.creado_en.desc() if hasattr(Mensaje, "creado_en") else Mensaje.id_mensaje.desc())
+    total = qry.count()
+    rows = (
+        qry.order_by(Mensaje.actualizado_en.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
         .all()
     )
 
-    medico_ids = list({m.id_medico for m in items if getattr(m, "id_medico", None) is not None})
-    medicos = db.query(Medico).filter(Medico.id_medico.in_(medico_ids)).all() if medico_ids else []
-    medicos_by_id = {m.id_medico: m for m in medicos}
-
-    user_ids = list({m.id_usuario for m in medicos if getattr(m, "id_usuario", None) is not None})
-    users = db.query(Usuario).filter(Usuario.id_usuario.in_(user_ids)).all() if user_ids else []
-    users_by_id = {u.id_usuario: u for u in users}
-
-    out_items = []
-    for m in items:
-        medico = medicos_by_id.get(m.id_medico)
-        usuario = users_by_id.get(medico.id_usuario) if medico else None
-        out_items.append({
-            "id_mensaje": m.id_mensaje,
-            "id_medico": m.id_medico,
-            "id_paciente": m.id_paciente,
-            "tipo": m.tipo,
-            "titulo": m.titulo,
-            "descripcion": m.descripcion,
-            "severidad": m.severidad,
-            "adjunto_url": m.adjunto_url,
-            "estado": m.estado,
-            "respuesta_admin": m.respuesta_admin,
-            "leido_admin": m.leido_admin,
-            "leido_medico": m.leido_medico,
-            "creado_en": m.creado_en,
-            "actualizado_en": m.actualizado_en,
-            "medico_nombre": getattr(usuario, "nombre", None),
-            "medico_apellido": getattr(usuario, "apellido", None),
-            "medico_correo": getattr(usuario, "correo", None),
+    items = []
+    for msg, med, usr in rows:
+        items.append({
+            "id_mensaje": msg.id_mensaje,
+            "id_medico": msg.id_medico,
+            "id_paciente": msg.id_paciente,
+            "tipo": msg.tipo,
+            "titulo": msg.titulo,
+            "descripcion": msg.descripcion,
+            "severidad": msg.severidad,
+            "adjunto_url": msg.adjunto_url,
+            "estado": msg.estado,
+            "respuesta_admin": msg.respuesta_admin,
+            "leido_admin": bool(msg.leido_admin),
+            "leido_medico": bool(msg.leido_medico),
+            "creado_en": msg.creado_en,
+            "actualizado_en": msg.actualizado_en,
+            "emisor": {
+                "id_medico": med.id_medico,
+                "id_usuario": usr.id_usuario,
+                "nombre": usr.nombre,
+                "apellido": usr.apellido,
+                "correo": usr.correo,
+            },
         })
-
-    return {"total": total, "items": out_items}
-
-
-class MensajeAdminUpdateIn(BaseModel):
-    estado: Optional[str] = None
-    respuesta_admin: Optional[str] = None
-    leido_admin: Optional[bool] = None
+    return {"total": total, "items": items}
 
 
-# ---------------------------
-# Admin: responder/actualizar
-# ---------------------------
-@router.patch("/admin/{id_mensaje}")
-def actualizar_mensaje_admin(
+@router.patch("/admin/inbox/{id_mensaje}")
+def admin_actualizar_mensaje(
     id_mensaje: int,
-    body: MensajeAdminUpdateIn,
+    body: AdminMensajeUpdateIn,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
     _ensure_admin(current_user)
-
     m = db.query(Mensaje).filter(Mensaje.id_mensaje == id_mensaje).first()
     if not m:
         raise HTTPException(status_code=404, detail="Mensaje no encontrado")
 
-    if body.estado is not None:
-        estado = body.estado.strip()
-        if not estado:
-            raise HTTPException(status_code=400, detail="Estado invalido")
-        m.estado = estado
-    if body.respuesta_admin is not None:
-        txt = body.respuesta_admin.strip()
-        m.respuesta_admin = txt if txt else None
-    if body.leido_admin is not None:
-        m.leido_admin = bool(body.leido_admin)
+    data = body.model_dump(exclude_unset=True)
+    for field in ("estado", "respuesta_admin", "leido_admin"):
+        if field in data:
+            setattr(m, field, data[field])
 
     if hasattr(Mensaje, "actualizado_en"):
         m.actualizado_en = datetime.utcnow()
-
     db.commit()
-    db.refresh(m)
-    return {"ok": True, "item": m}
+    return {"ok": True}

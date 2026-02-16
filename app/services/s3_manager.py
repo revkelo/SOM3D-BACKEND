@@ -160,6 +160,13 @@ class S3Manager:
                 return False
             raise
 
+    def delete(self, key: str) -> None:
+        """
+        Elimina un objeto por key. Si no existe, S3/MinIO responde OK.
+        """
+        k = self._norm(key)
+        self.client.delete_object(Bucket=self.cfg.bucket, Key=k)
+
     # ------------------ Listado ------------------
 
     def list(self, prefix: Optional[str] = None) -> List[str]:

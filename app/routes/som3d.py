@@ -96,6 +96,8 @@ LOG_KEY = "job.log"
 MANIFEST_KEY = "manifest.json"
 INPUT_ZIP = "input.zip"
 RESULT_ZIP = "stl_result.zip"
+MAX_UPLOAD_MB = max(1, int(os.getenv("SOM3D_MAX_UPLOAD_MB", "1024")))
+MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 
 
 def _ensure_s3() -> S3Manager:
@@ -497,13 +499,29 @@ async def create_job(
     s3_prefix = _s3_job_base(job_id)
 
     # Guardar ZIP en temporal local y NO subir a S3
-    local_tmp = Path(tempfile.mkdtemp(prefix=f"upload_{job_id}_")) / file.filename
-    with local_tmp.open("wb") as f:
-        while True:
-            chunk = await file.read(2 * 1024 * 1024)
-            if not chunk:
-                break
-            f.write(chunk)
+    tmp_dir = Path(tempfile.mkdtemp(prefix=f"upload_{job_id}_"))
+    local_tmp = tmp_dir / file.filename
+    bytes_written = 0
+    try:
+        with local_tmp.open("wb") as f:
+            while True:
+                chunk = await file.read(2 * 1024 * 1024)
+                if not chunk:
+                    break
+                bytes_written += len(chunk)
+                if bytes_written > MAX_UPLOAD_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"El ZIP supera el limite permitido de {MAX_UPLOAD_MB}MB",
+                    )
+                f.write(chunk)
+    except HTTPException:
+        try:
+            local_tmp.unlink(missing_ok=True)
+            tmp_dir.rmdir()
+        except Exception:
+            pass
+        raise
 
     extra_list: List[str] = []
     if extra_tasks:

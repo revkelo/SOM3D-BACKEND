@@ -1,4 +1,4 @@
-import os, hashlib, json
+﻿import os, hashlib, json
 from datetime import datetime
 from typing import Dict, Any
 
@@ -6,15 +6,76 @@ import httpx
 from fastapi import APIRouter, Request, Depends
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
 
 from ..db import get_db
-from ..models import Suscripcion, Pago, Plan, Medico
+from ..models import Suscripcion, Pago, Plan, Medico, Hospital, Usuario, PaymentWebhookEvent
 from ..core.config import EPAYCO_PUBLIC_KEY, EPAYCO_TEST, BASE_URL, P_CUST_ID_CLIENTE, P_KEY
+from ..services.mailer import send_email
+from ..services.mail_templates import template_payment_confirm
 
 router = APIRouter(prefix="/epayco", tags=["epayco"])
 
 STATUS_MAP = {"1": "APROBADO", "2": "RECHAZADO", "3": "PENDIENTE", "4": "FALLIDO"}
-PROCESADOS = set()
+
+
+def _upsert_webhook_event(
+    db: Session,
+    *,
+    ref_payco: str,
+    transaction_id: str | None,
+    estado: str | None,
+    firma_valida: bool,
+    payload: dict,
+) -> PaymentWebhookEvent:
+    ev = db.query(PaymentWebhookEvent).filter(PaymentWebhookEvent.ref_payco == ref_payco).first()
+    if not ev:
+        ev = PaymentWebhookEvent(ref_payco=ref_payco)
+        db.add(ev)
+    ev.transaction_id = transaction_id
+    ev.estado = estado
+    ev.firma_valida = bool(firma_valida)
+    ev.payload_json = json.dumps(payload, ensure_ascii=False)
+    ev.attempts = int(getattr(ev, "attempts", 0) or 0) + 1
+    ev.last_error = None
+    db.flush()
+    return ev
+
+
+def _send_payment_confirmation_email(db: Session, sus: Suscripcion, plan: Plan | None, ref: str, amount: str, when: datetime) -> None:
+    try:
+        if sus.id_medico is not None:
+            med = db.query(Medico).filter(Medico.id_medico == sus.id_medico).first()
+            if not med:
+                return
+            usr = db.query(Usuario).filter(Usuario.id_usuario == med.id_usuario).first()
+            if not usr or not usr.correo:
+                return
+            html = template_payment_confirm(
+                nombre=(usr.nombre or "Usuario"),
+                plan_nombre=(plan.nombre if plan else f"Plan {sus.id_plan}"),
+                monto=str(amount),
+                referencia=str(ref),
+                fecha_iso=when.isoformat(timespec="seconds"),
+            )
+            send_email(str(usr.correo), "Pago confirmado - 3DVinci Health", html)
+            return
+
+        if sus.id_hospital is not None:
+            hosp = db.query(Hospital).filter(Hospital.id_hospital == sus.id_hospital).first()
+            if not hosp or not hosp.correo:
+                return
+            html = template_payment_confirm(
+                nombre=(hosp.nombre or "Hospital"),
+                plan_nombre=(plan.nombre if plan else f"Plan {sus.id_plan}"),
+                monto=str(amount),
+                referencia=str(ref),
+                fecha_iso=when.isoformat(timespec="seconds"),
+            )
+            send_email(str(hosp.correo), "Pago confirmado - 3DVinci Health", html)
+    except Exception:
+        # Nunca romper confirmaciÃ³n de pago por fallo de correo.
+        pass
 
 def _page(title: str, body_html: str) -> HTMLResponse:
     html = f"""
@@ -37,7 +98,7 @@ def _page(title: str, body_html: str) -> HTMLResponse:
 async def epayco_response(request: Request):
     params = dict(request.query_params)
     ref_payco = params.get("ref_payco")
-    detail = "<p class='warn'>No recibí <code>ref_payco</code> en la URL.</p>"
+    detail = "<p class='warn'>No recibÃ­ <code>ref_payco</code> en la URL.</p>"
     valid_json = {}
 
     if ref_payco:
@@ -50,7 +111,7 @@ async def epayco_response(request: Request):
             cod = str(d.get("x_cod_response", ""))
             estado = STATUS_MAP.get(cod, "DESCONOCIDO")
             detail = f"""
-            <p class="ok">Validación OK — estado: <b>{estado}</b></p>
+            <p class="ok">ValidaciÃ³n OK â€” estado: <b>{estado}</b></p>
             <table>
               <tr><td>ref_payco</td><td><code>{ref_payco}</code></td></tr>
               <tr><td>x_id_invoice</td><td>{d.get('x_id_invoice')}</td></tr>
@@ -62,7 +123,7 @@ async def epayco_response(request: Request):
             </table>
             """
         else:
-            detail = f"<p class='err'>La validación respondió error para <code>{ref_payco}</code>.</p>"
+            detail = f"<p class='err'>La validaciÃ³n respondiÃ³ error para <code>{ref_payco}</code>.</p>"
 
     body = f"""
     <div class="card">
@@ -70,9 +131,9 @@ async def epayco_response(request: Request):
       <p>QueryString recibido:</p>
       <pre>{json.dumps(params, indent=2, ensure_ascii=False)}</pre>
       <hr/>
-      <h4>Validación por <code>ref_payco</code></h4>
+      <h4>ValidaciÃ³n por <code>ref_payco</code></h4>
       {detail}
-      <h4>Raw de validación</h4>
+      <h4>Raw de validaciÃ³n</h4>
       <pre>{json.dumps(valid_json, indent=2, ensure_ascii=False)}</pre>
     </div>
     """
@@ -129,27 +190,52 @@ async def _epayco_confirmation_impl(method: str, request: Request, db: Session) 
     firma_ok = (expected == x_signature)
     estado = STATUS_MAP.get(x_cod_response, "DESCONOCIDO")
 
-    if x_ref_payco and x_ref_payco in PROCESADOS:
-        return JSONResponse({"ok": True, "duplicado": True, "firma_valida": firma_ok, "estado": estado, "ref": x_ref_payco})
+    webhook_event = None
+    if x_ref_payco:
+        webhook_event = _upsert_webhook_event(
+            db,
+            ref_payco=x_ref_payco,
+            transaction_id=x_transaction_id or None,
+            estado=estado,
+            firma_valida=firma_ok,
+            payload=payload,
+        )
+        if webhook_event.processed:
+            db.commit()
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "duplicado": True,
+                    "firma_valida": firma_ok,
+                    "estado": estado,
+                    "ref": x_ref_payco,
+                    "suscripcion": x_extra1,
+                    "invoice": x_id_invoice,
+                }
+            )
 
     if firma_ok and estado == "APROBADO" and x_extra1:
         sus = db.query(Suscripcion).filter(Suscripcion.id_suscripcion == int(x_extra1)).first()
         if sus:
             existing_pago = db.query(Pago).filter(Pago.referencia_epayco == x_ref_payco).first()
             if existing_pago:
-                PROCESADOS.add(x_ref_payco)
-                return JSONResponse({
-                    "ok": True,
-                    "duplicado": True,
-                    "firma_valida": True,
-                    "estado": estado,
-                    "ref": x_ref_payco,
-                    "suscripcion": x_extra1,
-                })
+                if webhook_event:
+                    webhook_event.processed = True
+                db.commit()
+                return JSONResponse(
+                    {
+                        "ok": True,
+                        "duplicado": True,
+                        "firma_valida": True,
+                        "estado": estado,
+                        "ref": x_ref_payco,
+                        "suscripcion": x_extra1,
+                    }
+                )
             pago = Pago(
                 id_suscripcion=sus.id_suscripcion,
                 referencia_epayco=x_ref_payco,
-                monto=float(x_amount or 0)
+                monto=float(x_amount or 0),
             )
             db.add(pago)
             conflict_q = db.query(Suscripcion).filter(
@@ -162,17 +248,20 @@ async def _epayco_confirmation_impl(method: str, request: Request, db: Session) 
                 conflict_q = conflict_q.filter(Suscripcion.id_hospital == sus.id_hospital)
             conflict = conflict_q.first()
             if conflict:
+                if webhook_event:
+                    webhook_event.processed = True
                 db.commit()
-                PROCESADOS.add(x_ref_payco)
-                return JSONResponse({
-                    "ok": True,
-                    "firma_valida": True,
-                    "estado": estado,
-                    "ref": x_ref_payco,
-                    "suscripcion": x_extra1,
-                    "activada": False,
-                    "motivo": "Ya existe otra Suscripción ACTIVA para este titular",
-                })
+                return JSONResponse(
+                    {
+                        "ok": True,
+                        "firma_valida": True,
+                        "estado": estado,
+                        "ref": x_ref_payco,
+                        "suscripcion": x_extra1,
+                        "activada": False,
+                        "motivo": "Ya existe otra Suscripción ACTIVA para este titular",
+                    }
+                )
 
             plan = db.query(Plan).filter(Plan.id_plan == sus.id_plan).first()
             now = datetime.utcnow()
@@ -183,12 +272,26 @@ async def _epayco_confirmation_impl(method: str, request: Request, db: Session) 
             try:
                 if sus.id_medico is not None:
                     med = db.query(Medico).filter(Medico.id_medico == sus.id_medico).first()
-                    if med and getattr(med, 'usuario', None):
+                    if med and getattr(med, "usuario", None):
                         med.usuario.activo = True
             except Exception:
                 pass
+            if webhook_event:
+                webhook_event.processed = True
             db.commit()
-            PROCESADOS.add(x_ref_payco)
+            _send_payment_confirmation_email(
+                db=db,
+                sus=sus,
+                plan=plan,
+                ref=x_ref_payco,
+                amount=x_amount or "0",
+                when=now,
+            )
+    elif webhook_event:
+        try:
+            db.commit()
+        except SQLAlchemyError:
+            db.rollback()
 
     return JSONResponse({"ok": True, "firma_valida": firma_ok, "estado": estado, "ref": x_ref_payco, "suscripcion": x_extra1, "invoice": x_id_invoice})
 
@@ -201,4 +304,5 @@ async def epayco_confirmation_get(request: Request, db: Session = Depends(get_db
 @router.post("/confirmation", name="epayco_confirmation_post", operation_id="epayco_confirmation_post")
 async def epayco_confirmation_post(request: Request, db: Session = Depends(get_db)):
     return await _epayco_confirmation_impl("POST", request, db)
+
 

@@ -15,16 +15,22 @@ def mysql_url() -> str:
     db   = os.getenv("DB_NAME", "casaos")
     return f"mysql+pymysql://{user}:{pwd}@{host}:{port}/{db}"
 
-JWT_SECRET = os.getenv("JWT_SECRET", "LeonardoDaVinci")
+JWT_SECRET = os.getenv("JWT_SECRET", "").strip()
+if not JWT_SECRET:
+    raise RuntimeError("JWT_SECRET is required and must be set in environment")
+if JWT_SECRET in {"LeonardoDaVinci", "changeme", "change-me"}:
+    raise RuntimeError("JWT_SECRET is insecure. Configure a strong random value.")
+
 JWT_ALG = os.getenv("JWT_ALG", "HS256")
-JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "60"))
+JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "15"))
 
 # Refresh tokens (cookies)
 REFRESH_TOKEN_EXPIRE_MINUTES = int(os.getenv("REFRESH_TOKEN_EXPIRE_MINUTES", "43200"))  # 30 days
 REFRESH_COOKIE_NAME = os.getenv("REFRESH_COOKIE_NAME", "refresh_token")
 # SameSite values: 'lax' | 'strict' | 'none'
 REFRESH_COOKIE_SAMESITE = os.getenv("REFRESH_COOKIE_SAMESITE", "lax").lower()
-REFRESH_COOKIE_SECURE = os.getenv("REFRESH_COOKIE_SECURE", "false").lower() == "true"
+REFRESH_COOKIE_SECURE = os.getenv("REFRESH_COOKIE_SECURE", "true").lower() == "true"
+CSRF_COOKIE_NAME = os.getenv("CSRF_COOKIE_NAME", "csrf_token")
 
 # CORS: Frontend origins (comma-separated)
 FRONTEND_ORIGINS = [

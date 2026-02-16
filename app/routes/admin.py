@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from ..core.security import get_current_user
 from ..db import get_db
-from ..models import Estudio, Hospital, Medico, Paciente, Pago, Plan, Suscripcion, Usuario
+from ..models import ClinicalAudit, Estudio, Hospital, Medico, Paciente, Pago, Plan, Suscripcion, Usuario
 
 
 router = APIRouter()
@@ -330,3 +330,33 @@ def hospitals_billing(db: Session = Depends(get_db), user=Depends(get_current_us
             }
         )
     return results
+
+
+@router.get("/admin/audit/clinical")
+def clinical_audit(
+    limit: int = 100,
+    entity_type: str | None = None,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    _ensure_admin(user)
+    q = db.query(ClinicalAudit)
+    if entity_type:
+        q = q.filter(ClinicalAudit.entity_type == entity_type.upper())
+    rows = q.order_by(ClinicalAudit.created_at.desc()).limit(max(1, min(limit, 500))).all()
+    out = []
+    for r in rows:
+        out.append(
+            {
+                "id_audit": r.id_audit,
+                "entity_type": r.entity_type,
+                "entity_id": r.entity_id,
+                "action": r.action,
+                "actor_id_usuario": r.actor_id_usuario,
+                "before_json": r.before_json,
+                "after_json": r.after_json,
+                "meta_json": r.meta_json,
+                "created_at": str(r.created_at) if r.created_at else None,
+            }
+        )
+    return out

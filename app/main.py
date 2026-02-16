@@ -31,10 +31,16 @@ except Exception:
 
 from .core.config import FRONTEND_ORIGINS
 from .core.health import ensure_services_ready, run_health_checks
+from .db import ensure_runtime_tables
 
 app = FastAPI(title="SOM3D Backend", version="1.0.0")
 
-_cors_origins = FRONTEND_ORIGINS if FRONTEND_ORIGINS else ["*"]
+_cors_origins = FRONTEND_ORIGINS if FRONTEND_ORIGINS else [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:5500",
+    "http://127.0.0.1:5500",
+]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
@@ -61,12 +67,13 @@ app.include_router(mensajes_router)
 
 # Static files (admin dashboard)
 static_dir = os.path.join(os.path.dirname(__file__), "static")
-if os.path.isdir(static_dir):
-    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+os.makedirs(static_dir, exist_ok=True)
+app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 @app.on_event("startup")
 async def startup_healthcheck():
     # Ensure critical dependencies are available before serving traffic
+    ensure_runtime_tables()
     ensure_services_ready()
 
 @app.get("/health", tags=["health"])

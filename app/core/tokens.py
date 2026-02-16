@@ -87,11 +87,17 @@ def parse_reset_code_token(token: str) -> dict | None:
 # Refresh tokens
 # -----------------------
 
-def make_refresh_token(user_id: int, hashed_password: str, expires_minutes: int | None = None) -> str:
+def make_refresh_token(
+    user_id: int,
+    hashed_password: str,
+    expires_minutes: int | None = None,
+    jti: str | None = None,
+) -> str:
     exp_min = expires_minutes if expires_minutes is not None else REFRESH_TOKEN_EXPIRE_MINUTES
     payload = {
         "k": "refresh",
         "sub": str(user_id),
+        "jti": str(jti or ""),
         # Fingerprint del password para invalidar refresh si cambia la contraseña
         "fp": _fp_password(hashed_password),
         "iat": int(_now().timestamp()),

@@ -70,6 +70,32 @@ def get_state(estado_id: int, db: Session = Depends(get_db), user=Depends(get_cu
     return st
 
 
+@router.patch("/visor/states/{estado_id}", response_model=VisorEstadoOut)
+def update_state(estado_id: int, payload: VisorEstadoIn, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    st = db.query(VisorEstado).filter(VisorEstado.id_visor_estado == estado_id).first()
+    if not st:
+        raise HTTPException(status_code=404, detail="Estado no encontrado")
+
+    if getattr(user, "rol", None) != "ADMINISTRADOR":
+        med = db.query(Medico).filter(Medico.id_usuario == user.id_usuario).first()
+        if not med or st.id_medico != med.id_medico:
+            raise HTTPException(status_code=403, detail="No autorizado")
+        # Evitar que un medico cambie ownership de paciente ajeno
+        _ensure_owner(db, user, payload.id_paciente)
+
+    st.id_paciente = payload.id_paciente
+    st.id_jobstl = payload.id_jobstl
+    st.titulo = payload.titulo
+    st.descripcion = payload.descripcion
+    st.ui_json = payload.ui_json
+    st.modelos_json = payload.modelos_json
+    st.notas_json = payload.notas_json
+    st.i18n_json = payload.i18n_json
+    db.commit()
+    db.refresh(st)
+    return st
+
+
 @router.delete("/visor/states/{estado_id}", status_code=204)
 def delete_state(estado_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
     st = db.query(VisorEstado).filter(VisorEstado.id_visor_estado == estado_id).first()

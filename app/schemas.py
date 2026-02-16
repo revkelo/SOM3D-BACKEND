@@ -6,7 +6,7 @@ class RegisterIn(BaseModel):
     nombre: str = Field(min_length=1, max_length=100)
     apellido: str = Field(min_length=1, max_length=100)
     correo: EmailStr
-    password: str = Field(min_length=6, max_length=128)
+    password: str = Field(min_length=8, max_length=128)
     telefono: Optional[str] = None
     direccion: Optional[str] = None
     ciudad: Optional[str] = None
@@ -43,7 +43,7 @@ class UserUpdateIn(BaseModel):
     telefono: Optional[str] = Field(default=None, max_length=20)
     direccion: Optional[str] = Field(default=None, max_length=255)
     ciudad: Optional[str] = Field(default=None, max_length=100)
-    password: Optional[str] = Field(default=None, min_length=6, max_length=128)
+    password: Optional[str] = Field(default=None, min_length=8, max_length=128)
 
 class StartSubscriptionIn(BaseModel):
     plan_id: int
@@ -184,7 +184,7 @@ class ForgotPasswordIn(BaseModel):
 
 class ResetPasswordIn(BaseModel):
     token: str = Field(min_length=10, max_length=200)
-    new_password: str = Field(min_length=6, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
 
 
 class ConfirmCodeIn(BaseModel):
@@ -195,7 +195,7 @@ class ConfirmCodeIn(BaseModel):
 class ResetPasswordCodeIn(BaseModel):
     token: str = Field(min_length=10, max_length=4096)
     code: str = Field(min_length=6, max_length=6)
-    new_password: str = Field(min_length=6, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
 
 
 # --------------------
@@ -274,6 +274,26 @@ class EstudioOut(BaseModel):
         from_attributes = True
 
 
+class ClinicalNoteIn(BaseModel):
+    texto: str = Field(min_length=1, max_length=10000)
+    segmento: Optional[str] = Field(default="GENERAL", max_length=60)
+    anchor_json: Optional[str] = None
+
+
+class ClinicalNoteOut(BaseModel):
+    id_note: int
+    id_paciente: int
+    id_medico: int
+    segmento: str
+    texto: str
+    anchor_json: Optional[str]
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
 # --------------------
 # Jobs (DB) + finalize
 # --------------------
@@ -322,7 +342,7 @@ class DoctorIn(BaseModel):
     nombre: str = Field(min_length=1, max_length=100)
     apellido: str = Field(min_length=1, max_length=100)
     correo: EmailStr
-    password: str = Field(min_length=6, max_length=128)
+    password: str = Field(min_length=8, max_length=128)
     telefono: Optional[str] = Field(default=None, max_length=20)
     direccion: Optional[str] = Field(default=None, max_length=255)
     ciudad: Optional[str] = Field(default=None, max_length=100)
@@ -335,7 +355,7 @@ class DoctorUpdateIn(BaseModel):
     nombre: Optional[str] = Field(default=None, max_length=100)
     apellido: Optional[str] = Field(default=None, max_length=100)
     correo: Optional[EmailStr] = None
-    password: Optional[str] = Field(default=None, min_length=6, max_length=128)
+    password: Optional[str] = Field(default=None, min_length=8, max_length=128)
     telefono: Optional[str] = Field(default=None, max_length=20)
     direccion: Optional[str] = Field(default=None, max_length=255)
     ciudad: Optional[str] = Field(default=None, max_length=100)
@@ -367,7 +387,7 @@ class AdminCreateIn(BaseModel):
     nombre: str = Field(min_length=1, max_length=100)
     apellido: str = Field(min_length=1, max_length=100)
     correo: EmailStr
-    password: str = Field(min_length=6, max_length=128)
+    password: str = Field(min_length=8, max_length=128)
     telefono: Optional[str] = Field(default=None, max_length=20)
     direccion: Optional[str] = Field(default=None, max_length=255)
     ciudad: Optional[str] = Field(default=None, max_length=100)

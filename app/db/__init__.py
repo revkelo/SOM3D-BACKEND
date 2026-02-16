@@ -15,3 +15,18 @@ def get_db():
     finally:
         db.close()
 
+
+def ensure_runtime_tables():
+    # Solo crea tablas auxiliares faltantes sin tocar el resto del esquema.
+    from ..models import AuthLoginAttempt, AuthRefreshSession, PaymentWebhookEvent, ClinicalNote
+
+    Base.metadata.create_all(
+        bind=engine,
+        tables=[
+            AuthLoginAttempt.__table__,
+            AuthRefreshSession.__table__,
+            PaymentWebhookEvent.__table__,
+            ClinicalNote.__table__,
+        ],
+    )
+

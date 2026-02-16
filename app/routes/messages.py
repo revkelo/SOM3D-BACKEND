@@ -242,9 +242,17 @@ def admin_actualizar_mensaje(
         raise HTTPException(status_code=404, detail="Mensaje no encontrado")
 
     data = body.model_dump(exclude_unset=True)
+    respuesta_nueva = None
+    if "respuesta_admin" in data:
+        respuesta_nueva = (data.get("respuesta_admin") or "").strip()
+        data["respuesta_admin"] = respuesta_nueva or None
     for field in ("estado", "respuesta_admin", "leido_admin"):
         if field in data:
             setattr(m, field, data[field])
+
+    # Si el admin respondió, el médico debe ver ese mensaje como no leído.
+    if respuesta_nueva:
+        m.leido_medico = False
 
     if hasattr(Mensaje, "actualizado_en"):
         m.actualizado_en = datetime.utcnow()

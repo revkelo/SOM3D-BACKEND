@@ -676,6 +676,12 @@ class ClinicalNoteIn(BaseModel):
     anchor_json: Optional[str] = None
 
 
+class ClinicalNoteUpdateIn(BaseModel):
+    texto: Optional[str] = Field(default=None, min_length=1, max_length=10000)
+    segmento: Optional[str] = Field(default=None, max_length=60)
+    anchor_json: Optional[str] = None
+
+
 class ClinicalNoteOut(BaseModel):
     id_note: int
     id_paciente: int

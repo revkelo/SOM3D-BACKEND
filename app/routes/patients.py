@@ -7,7 +7,14 @@ from sqlalchemy.orm import Session
 from ..db import get_db
 from ..core.security import get_current_user
 from ..models import Paciente, Medico, Usuario, ClinicalAudit, ClinicalNote
-from ..schemas import PacienteIn, PacienteOut, PacienteUpdateIn, ClinicalNoteIn, ClinicalNoteOut
+from ..schemas import (
+    PacienteIn,
+    PacienteOut,
+    PacienteUpdateIn,
+    ClinicalNoteIn,
+    ClinicalNoteOut,
+    ClinicalNoteUpdateIn,
+)
 
 router = APIRouter()
 
@@ -148,6 +155,23 @@ def _get_patient_owned(db: Session, user: Usuario, paciente_id: int) -> Paciente
     return p
 
 
+def _get_note_owned(db: Session, user: Usuario, paciente_id: int, note_id: int) -> ClinicalNote:
+    p = _get_patient_owned(db, user, paciente_id)
+    note = (
+        db.query(ClinicalNote)
+        .filter(ClinicalNote.id_note == note_id, ClinicalNote.id_paciente == p.id_paciente)
+        .first()
+    )
+    if not note:
+        raise HTTPException(status_code=404, detail="Nota no encontrada")
+    if getattr(user, "rol", None) == "ADMINISTRADOR":
+        return note
+    med = db.query(Medico).filter(Medico.id_usuario == user.id_usuario).first()
+    if not med or med.id_medico != note.id_medico:
+        raise HTTPException(status_code=403, detail="No autorizado")
+    return note
+
+
 @router.get("/patients/{paciente_id}", response_model=PacienteOut)
 def get_patient(paciente_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
     p = _get_patient_owned(db, user, paciente_id)
@@ -249,3 +273,41 @@ def create_patient_note(
     db.commit()
     db.refresh(note)
     return note
+
+
+@router.patch("/patients/{paciente_id}/notes/{note_id}", response_model=ClinicalNoteOut)
+def update_patient_note(
+    paciente_id: int,
+    note_id: int,
+    payload: ClinicalNoteUpdateIn,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    note = _get_note_owned(db, user, paciente_id, note_id)
+    data = payload.model_dump(exclude_unset=True)
+    if not data:
+        raise HTTPException(status_code=400, detail="No hay cambios para aplicar")
+    if "segmento" in data and data["segmento"] is not None:
+        data["segmento"] = str(data["segmento"]).strip().upper()[:60]
+    if "texto" in data and data["texto"] is not None:
+        data["texto"] = str(data["texto"]).strip()
+        if not data["texto"]:
+            raise HTTPException(status_code=422, detail="Texto invalido")
+    for k, v in data.items():
+        setattr(note, k, v)
+    db.commit()
+    db.refresh(note)
+    return note
+
+
+@router.delete("/patients/{paciente_id}/notes/{note_id}", status_code=204)
+def delete_patient_note(
+    paciente_id: int,
+    note_id: int,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    note = _get_note_owned(db, user, paciente_id, note_id)
+    db.delete(note)
+    db.commit()
+    return

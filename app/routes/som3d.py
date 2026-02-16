@@ -22,7 +22,7 @@ from app.services.som3d.generator import NiftiToSTLConverter
 from sqlalchemy.orm import Session
 from ..db import get_db
 from ..core.security import get_current_user, get_current_user_optional
-from ..models import JobConv, JobSTL, Paciente, Medico, Usuario
+from ..models import JobConv, JobSTL, Paciente, Medico, Usuario, VisorEstado
 from ..schemas import FinalizeJobIn, JobSTLOut, PatientJobSTLOut, JobSTLNoteUpdateIn
 from ..core.config import mysql_url
 
@@ -32,6 +32,10 @@ router = APIRouter(prefix="/som3d", tags=["som3d"])
 
 def _is_admin(user: Any) -> bool:
     return str(getattr(user, "rol", "")).upper() == "ADMINISTRADOR"
+
+
+def _is_medico(user: Any) -> bool:
+    return str(getattr(user, "rol", "")).upper() == "MEDICO"
 
 
 def _ensure_job_access(db: Session, user: Any, job_id: str) -> None:
@@ -60,6 +64,21 @@ def _get_jobstl_owned(db: Session, user: Any, id_jobstl: int) -> JobSTL:
     if not p or not med or p.id_medico != med.id_medico:
         raise HTTPException(status_code=403, detail="No autorizado")
     return js
+
+
+def _delete_job_artifacts_s3(job_id: str) -> int:
+    """Elimina todos los objetos del job en S3/MinIO."""
+    s3 = _ensure_s3()
+    base_key = _s3_job_base(job_id)
+    keys = s3.list(base_key)
+    for key in keys:
+        s3.delete(key)
+    # Borra tambien un posible objeto "folder marker" del prefijo base.
+    try:
+        s3.delete(base_key)
+    except Exception:
+        pass
+    return len(keys)
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -895,6 +914,39 @@ async def update_jobstl_notes(
     db.commit()
     db.refresh(js)
     return js
+
+
+@router.delete("/jobstl/{id_jobstl}", status_code=204)
+async def delete_jobstl(
+    id_jobstl: int,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    if not (_is_admin(user) or _is_medico(user)):
+        raise HTTPException(status_code=403, detail="No autorizado")
+
+    js = _get_jobstl_owned(db, user, id_jobstl)
+    # Refuerza ownership por creador del job para usuarios no admin.
+    _ensure_job_access(db, user, js.job_id)
+
+    # Eliminar artefactos del job en MinIO/S3 primero.
+    try:
+        _delete_job_artifacts_s3(js.job_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"No se pudo borrar en MinIO/S3: {e}")
+
+    jobstl_ids = [int(r[0]) for r in db.query(JobSTL.id_jobstl).filter(JobSTL.job_id == js.job_id).all()]
+    try:
+        if jobstl_ids:
+            db.query(VisorEstado).filter(VisorEstado.id_jobstl.in_(jobstl_ids)).delete(synchronize_session=False)
+        db.query(JobSTL).filter(JobSTL.job_id == js.job_id).delete(synchronize_session=False)
+        db.query(JobConv).filter(JobConv.job_id == js.job_id).delete(synchronize_session=False)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="No se pudo borrar el registro 3D en base de datos")
+
+    return Response(status_code=204)
 
 
 @router.delete("/jobs/{job_id}")

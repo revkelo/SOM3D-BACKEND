@@ -1,10 +1,12 @@
 ﻿import os, hashlib, json
 from datetime import datetime
+import html
 from typing import Dict, Any
 
 import httpx
 from fastapi import APIRouter, Request, Depends
 from fastapi.responses import HTMLResponse, JSONResponse
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -17,6 +19,10 @@ from ..services.mail_templates import template_payment_confirm
 router = APIRouter(prefix="/epayco", tags=["epayco"])
 
 STATUS_MAP = {"1": "APROBADO", "2": "RECHAZADO", "3": "PENDIENTE", "4": "FALLIDO"}
+
+
+def _esc(value: Any) -> str:
+    return html.escape(str(value or ""), quote=True)
 
 
 def _upsert_webhook_event(
@@ -78,10 +84,11 @@ def _send_payment_confirmation_email(db: Session, sus: Suscripcion, plan: Plan |
         pass
 
 def _page(title: str, body_html: str) -> HTMLResponse:
+    safe_title = _esc(title)
     html = f"""
     <!doctype html><html lang="es"><head>
     <meta charset="utf-8" /><meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>{title}</title>
+    <title>{safe_title}</title>
     <style>
       body{{font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,sans-serif;padding:24px;max-width:960px;margin:auto}}
       .card{{border:1px solid #e5e7eb;border-radius:12px;padding:16px;margin:12px 0}}
@@ -91,7 +98,7 @@ def _page(title: str, body_html: str) -> HTMLResponse:
       .ok{{color:#0b7d62;font-weight:600}} .warn{{color:#b58900;font-weight:600}} .err{{color:#b00020;font-weight:600}}
       small{{opacity:.7}}
     </style></head><body>
-    <h2>{title}</h2>{body_html}</body></html>"""
+    <h2>{safe_title}</h2>{body_html}</body></html>"""
     return HTMLResponse(html)
 
 @router.get("/response", response_class=HTMLResponse)
@@ -111,30 +118,30 @@ async def epayco_response(request: Request):
             cod = str(d.get("x_cod_response", ""))
             estado = STATUS_MAP.get(cod, "DESCONOCIDO")
             detail = f"""
-            <p class="ok">ValidaciÃ³n OK â€” estado: <b>{estado}</b></p>
+            <p class="ok">ValidaciÃ³n OK â€” estado: <b>{_esc(estado)}</b></p>
             <table>
-              <tr><td>ref_payco</td><td><code>{ref_payco}</code></td></tr>
-              <tr><td>x_id_invoice</td><td>{d.get('x_id_invoice')}</td></tr>
-              <tr><td>x_response</td><td>{d.get('x_response')}</td></tr>
-              <tr><td>x_response_reason_text</td><td>{d.get('x_response_reason_text')}</td></tr>
-              <tr><td>x_transaction_id</td><td>{d.get('x_transaction_id')}</td></tr>
-              <tr><td>x_amount x_currency</td><td>{d.get('x_amount')} {d.get('x_currency_code')}</td></tr>
-              <tr><td>x_transaction_date</td><td>{d.get('x_transaction_date')}</td></tr>
+              <tr><td>ref_payco</td><td><code>{_esc(ref_payco)}</code></td></tr>
+              <tr><td>x_id_invoice</td><td>{_esc(d.get('x_id_invoice'))}</td></tr>
+              <tr><td>x_response</td><td>{_esc(d.get('x_response'))}</td></tr>
+              <tr><td>x_response_reason_text</td><td>{_esc(d.get('x_response_reason_text'))}</td></tr>
+              <tr><td>x_transaction_id</td><td>{_esc(d.get('x_transaction_id'))}</td></tr>
+              <tr><td>x_amount x_currency</td><td>{_esc(d.get('x_amount'))} {_esc(d.get('x_currency_code'))}</td></tr>
+              <tr><td>x_transaction_date</td><td>{_esc(d.get('x_transaction_date'))}</td></tr>
             </table>
             """
         else:
-            detail = f"<p class='err'>La validaciÃ³n respondiÃ³ error para <code>{ref_payco}</code>.</p>"
+            detail = f"<p class='err'>La validaciÃ³n respondiÃ³ error para <code>{_esc(ref_payco)}</code>.</p>"
 
     body = f"""
     <div class="card">
       <h3>Respuesta de ePayco (cliente)</h3>
       <p>QueryString recibido:</p>
-      <pre>{json.dumps(params, indent=2, ensure_ascii=False)}</pre>
+      <pre>{_esc(json.dumps(params, indent=2, ensure_ascii=False))}</pre>
       <hr/>
       <h4>ValidaciÃ³n por <code>ref_payco</code></h4>
       {detail}
       <h4>Raw de validaciÃ³n</h4>
-      <pre>{json.dumps(valid_json, indent=2, ensure_ascii=False)}</pre>
+      <pre>{_esc(json.dumps(valid_json, indent=2, ensure_ascii=False))}</pre>
     </div>
     """
     return _page("Respuesta de Pago", body)
@@ -238,44 +245,14 @@ async def _epayco_confirmation_impl(method: str, request: Request, db: Session) 
                 monto=float(x_amount or 0),
             )
             db.add(pago)
-            conflict_q = db.query(Suscripcion).filter(
-                Suscripcion.estado == "ACTIVA",
-                Suscripcion.id_suscripcion != sus.id_suscripcion,
-            )
-            if sus.id_medico is not None:
-                conflict_q = conflict_q.filter(Suscripcion.id_medico == sus.id_medico)
-            elif sus.id_hospital is not None:
-                conflict_q = conflict_q.filter(Suscripcion.id_hospital == sus.id_hospital)
-            conflict = conflict_q.first()
-            if conflict:
-                if webhook_event:
-                    webhook_event.processed = True
-                db.commit()
-                return JSONResponse(
-                    {
-                        "ok": True,
-                        "firma_valida": True,
-                        "estado": estado,
-                        "ref": x_ref_payco,
-                        "suscripcion": x_extra1,
-                        "activada": False,
-                        "motivo": "Ya existe otra Suscripción ACTIVA para este titular",
-                    }
-                )
-
-            plan = db.query(Plan).filter(Plan.id_plan == sus.id_plan).first()
             now = datetime.utcnow()
-            sus.estado = "ACTIVA"
-            sus.fecha_inicio = now
-            from dateutil.relativedelta import relativedelta
-            sus.fecha_expiracion = now + relativedelta(months=+int(getattr(plan, "duracion_meses", 1)))
-            try:
-                if sus.id_medico is not None:
-                    med = db.query(Medico).filter(Medico.id_medico == sus.id_medico).first()
-                    if med and getattr(med, "usuario", None):
-                        med.usuario.activo = True
-            except Exception:
-                pass
+            db.flush()
+            db.execute(
+                text("CALL sp_activate_subscription(:sus_id, :now_dt)"),
+                {"sus_id": int(sus.id_suscripcion), "now_dt": now},
+            )
+            db.refresh(sus)
+            plan = db.query(Plan).filter(Plan.id_plan == sus.id_plan).first()
             if webhook_event:
                 webhook_event.processed = True
             db.commit()

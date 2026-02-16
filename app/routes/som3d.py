@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -98,6 +99,7 @@ INPUT_ZIP = "input.zip"
 RESULT_ZIP = "stl_result.zip"
 MAX_UPLOAD_MB = max(1, int(os.getenv("SOM3D_MAX_UPLOAD_MB", "1024")))
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
+_RE_PROCESS_NAME = re.compile("^[A-Za-z\\u00C0-\\u00FF0-9()_., -]{3,80}$")
 
 
 def _ensure_s3() -> S3Manager:
@@ -132,6 +134,17 @@ def _s3_key(job_id: str, *parts: str) -> str:
 
 def _now_ts() -> float:
     return time.time()
+
+
+def _safe_upload_filename(filename: str) -> str:
+    raw = str(filename or "").replace("\\", "/")
+    base = raw.split("/")[-1].strip().replace("\x00", "")
+    if not base or base in {".", ".."}:
+        return "upload.zip"
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", base)
+    if not safe.lower().endswith(".zip"):
+        safe += ".zip"
+    return safe
 
 
 def _zip_dir_to_bytes(dir_path: Path) -> bytes:
@@ -493,6 +506,10 @@ async def create_job(
     process_name = (nombre_proceso or "").strip()
     if process_name and len(process_name) > 80:
         raise HTTPException(status_code=400, detail="nombre_proceso no puede superar 80 caracteres")
+    if process_name:
+        process_name = re.sub(r"\s{2,}", " ", process_name).replace("<", "").replace(">", "")
+        if not _RE_PROCESS_NAME.fullmatch(process_name):
+            raise HTTPException(status_code=422, detail="nombre_proceso invalido")
 
     s3 = _ensure_s3()
     job_id = uuid.uuid4().hex
@@ -500,7 +517,8 @@ async def create_job(
 
     # Guardar ZIP en temporal local y NO subir a S3
     tmp_dir = Path(tempfile.mkdtemp(prefix=f"upload_{job_id}_"))
-    local_tmp = tmp_dir / file.filename
+    safe_upload_name = _safe_upload_filename(file.filename or "")
+    local_tmp = tmp_dir / safe_upload_name
     bytes_written = 0
     try:
         with local_tmp.open("wb") as f:

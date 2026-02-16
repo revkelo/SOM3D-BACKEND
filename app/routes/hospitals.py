@@ -31,7 +31,12 @@ def _build_onpage_html(amount: str, name: str, description: str, invoice: str, e
   data-epayco-extra1=\"{extra1}\">\n</script>""".strip()
 
 
-def _resolve_hospital_by_code(db: Session, codigo: str, require_code_usable: bool = False):
+def _resolve_hospital_by_code(
+    db: Session,
+    codigo: str,
+    require_code_usable: bool = False,
+    require_active_hospital: bool = True,
+):
     now = datetime.utcnow()
     hc = (
         db.query(HospitalCode)
@@ -42,7 +47,9 @@ def _resolve_hospital_by_code(db: Session, codigo: str, require_code_usable: boo
 
     if hc:
         h = db.query(Hospital).filter(Hospital.id_hospital == hc.id_hospital).first()
-        if not h or h.estado != "ACTIVO":
+        if not h:
+            raise HTTPException(status_code=404, detail="Hospital no encontrado")
+        if require_active_hospital and h.estado != "ACTIVO":
             raise HTTPException(status_code=404, detail="Hospital no encontrado o inactivo")
         if require_code_usable:
             if hc.revoked_at is not None:
@@ -55,7 +62,9 @@ def _resolve_hospital_by_code(db: Session, codigo: str, require_code_usable: boo
 
     # Compatibilidad con datos legacy: Hospital.codigo sin registro en HospitalCode
     h = db.query(Hospital).filter(Hospital.codigo == codigo).first()
-    if not h or h.estado != "ACTIVO":
+    if not h:
+        raise HTTPException(status_code=404, detail="Hospital no encontrado")
+    if require_active_hospital and h.estado != "ACTIVO":
         raise HTTPException(status_code=404, detail="Hospital no encontrado o inactivo")
 
     if require_code_usable:
@@ -105,7 +114,7 @@ def hospital_by_code(codigo: str, db: Session = Depends(get_db)):
 @router.get("/hospitals/status/{codigo}")
 def hospital_status(codigo: str, db: Session = Depends(get_db)):
     """Devuelve estado de suscripcion del hospital por codigo: plan, expiracion y ultimo pago."""
-    h, _ = _resolve_hospital_by_code(db, codigo, require_code_usable=False)
+    h, _ = _resolve_hospital_by_code(db, codigo, require_code_usable=False, require_active_hospital=False)
 
     # Preferir suscripcion ACTIVA, si no, la ultima PAUSADA
     sus_act = (
@@ -221,7 +230,7 @@ def link_hospital_by_code(payload: HospitalLinkByCodeIn, db: Session = Depends(g
 
     m = db.query(Medico).filter(Medico.id_usuario == user.id_usuario).first()
     if not m:
-        m = Medico(id_usuario=user.id_usuario, id_hospital=h.id_hospital, referenciado=False, estado="ACTIVO")
+        m = Medico(id_usuario=user.id_usuario, id_hospital=h.id_hospital, referenciado=False, estado="INACTIVO")
         db.add(m)
         db.flush()
     else:
@@ -232,11 +241,6 @@ def link_hospital_by_code(payload: HospitalLinkByCodeIn, db: Session = Depends(g
         if hc.used_at is None:
             hc.used_at = datetime.utcnow()
         hc.usado_por_id_medico = m.id_medico
-
-    try:
-        user.activo = True
-    except Exception:
-        pass
 
     has_active = (
         db.query(Suscripcion)
@@ -255,7 +259,7 @@ def link_hospital_by_code(payload: HospitalLinkByCodeIn, db: Session = Depends(g
 
 @router.post("/hospitals/start-subscription")
 def hospital_start_subscription(payload: HospitalStartSubscriptionIn, db: Session = Depends(get_db)):
-    h, _ = _resolve_hospital_by_code(db, payload.codigo, require_code_usable=False)
+    h, _ = _resolve_hospital_by_code(db, payload.codigo, require_code_usable=False, require_active_hospital=False)
 
     plan = None
     sus = None

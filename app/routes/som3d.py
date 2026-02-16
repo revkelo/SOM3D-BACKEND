@@ -979,7 +979,7 @@ async def get_log(
                 except Exception:
                     lines = []
 
-    if tail and tail > 0:
+    if (not full) and tail and tail > 0:
         try:
             t = int(tail)
             if t > 0:
@@ -1006,6 +1006,43 @@ async def get_log(
         "phase": phase,
         "full_available": (not used_fallback),
     }
+
+
+@router.get("/jobs/{job_id}/log/raw")
+async def get_log_raw(
+    job_id: str,
+    download: bool = False,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """Devuelve el log completo en texto plano (sin limite de lineas)."""
+    _ensure_job_access(db, user, job_id)
+    s3 = _ensure_s3()
+    log_key = _s3_key(job_id, LOG_KEY)
+    source = "manifest_tail"
+    text_data = ""
+
+    try:
+        data = s3.download_bytes(log_key)
+        text_data = data.decode("utf-8", errors="ignore")
+        source = "job.log"
+    except Exception:
+        try:
+            old_key = _s3_key(job_id, "logs/job.log")
+            data = s3.download_bytes(old_key)
+            text_data = data.decode("utf-8", errors="ignore")
+            source = "logs/job.log"
+        except Exception:
+            m = _load_manifest(job_id)
+            text_data = "\n".join((m.log_tail or [])) if m else ""
+            source = "manifest_tail"
+
+    headers = {
+        "X-Log-Source": source,
+    }
+    if download:
+        headers["Content-Disposition"] = f'attachment; filename="som3d_{job_id}.log"'
+    return Response(content=text_data, media_type="text/plain; charset=utf-8", headers=headers)
 
 
 @router.get("/jobs/{job_id}/stls")

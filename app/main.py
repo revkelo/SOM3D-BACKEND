@@ -78,10 +78,25 @@ async def add_security_headers(request, call_next):
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
     response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
-    response.headers.setdefault(
-        "Content-Security-Policy",
-        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'",
-    )
+    path = request.url.path or ""
+    is_docs_ui = path.startswith("/docs") or path.startswith("/redoc")
+    if is_docs_ui:
+        # Swagger/ReDoc cargan assets desde cdn.jsdelivr.net por defecto.
+        csp = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+            "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+            "img-src 'self' data: https://fastapi.tiangolo.com; "
+            "font-src 'self' data: https://cdn.jsdelivr.net; "
+            "object-src 'none'; frame-ancestors 'none'; base-uri 'self'"
+        )
+    else:
+        csp = (
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; object-src 'none'; "
+            "frame-ancestors 'none'; base-uri 'self'"
+        )
+    response.headers.setdefault("Content-Security-Policy", csp)
     if request.url.scheme == "https":
         response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
     return response

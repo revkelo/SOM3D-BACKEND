@@ -62,7 +62,7 @@ Puntos de salud y rutas
 - `GET /hospitals` (Bearer; lista activos; admin puede incluir todos)
 - `GET /hospitals/{id}` (Bearer)
 - `GET /hospitals/by-code/{codigo}` (público)
-- `POST /hospitals/link-by-code` (Bearer MEDICO; vincula por código y activa la cuenta)
+- `POST /hospitals/link-by-code` (Bearer MEDICO; vincula por código; la activación depende de la suscripción)
 - `POST /hospitals` (Bearer ADMIN)
 - `PATCH /hospitals/{id}` (Bearer ADMIN)
 - `DELETE /hospitals/{id}` (Bearer ADMIN; borra pagos y suscripciones asociadas y desasocia médicos)

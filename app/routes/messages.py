@@ -1,5 +1,6 @@
 ﻿# app/routes/messages.py
 import json
+import re
 from datetime import datetime
 from typing import Optional, Literal, Any
 
@@ -26,6 +27,16 @@ from ..schemas import MensajeOut, MensajeList
 from ..core.security import get_current_user
 
 router = APIRouter(prefix="/mensajes", tags=["Mensajes"])
+
+_RE_MSG_TITLE = re.compile("^[A-Za-z\\u00C0-\\u00FF0-9()_.,:;!?\"' -]{5,200}$")
+
+
+def _norm_spaces(value: str) -> str:
+    return re.sub(r"\s{2,}", " ", str(value or "").strip())
+
+
+def _clean_text(value: str, max_len: int) -> str:
+    return _norm_spaces(value).replace("<", "").replace(">", "")[:max_len]
 
 
 # ---------------------------
@@ -95,13 +106,20 @@ async def crear_mensaje(
         raise HTTPException(status_code=401, detail="No autenticado")
     medico = _get_current_medico(db, user_id)
 
+    titulo_clean = _clean_text(titulo, 200)
+    descripcion_clean = _clean_text(descripcion, 2000)
+    if not _RE_MSG_TITLE.fullmatch(titulo_clean):
+        raise HTTPException(status_code=422, detail="Titulo invalido")
+    if len(descripcion_clean) < 10:
+        raise HTTPException(status_code=422, detail="Descripcion invalida")
+
     ahora = datetime.utcnow()
     m = Mensaje(
         id_medico=medico.id_medico,
         id_paciente=id_paciente,
         tipo=tipo,
-        titulo=titulo.strip(),
-        descripcion=descripcion.strip(),
+        titulo=titulo_clean,
+        descripcion=descripcion_clean,
         severidad=severidad,
         adjunto_url=None,
         estado="nuevo",
@@ -399,7 +417,7 @@ def admin_actualizar_mensaje(
     changed = {}
 
     if "respuesta_admin" in data:
-        respuesta_nueva = (data.get("respuesta_admin") or "").strip()
+        respuesta_nueva = _clean_text((data.get("respuesta_admin") or ""), 4000)
         data["respuesta_admin"] = respuesta_nueva or None
 
     for field in ("estado", "respuesta_admin", "leido_admin"):

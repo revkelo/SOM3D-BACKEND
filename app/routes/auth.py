@@ -34,6 +34,8 @@ from ..core.config import (
     REFRESH_COOKIE_SAMESITE,
     REFRESH_COOKIE_SECURE,
     CSRF_COOKIE_NAME,
+    JWT_SECRET,
+    TRUST_PROXY_HEADERS,
 )
 from ..core.tokens import (
     make_pre_register_token,
@@ -57,11 +59,13 @@ LOGIN_WINDOW_MINUTES = 15
 LOGIN_LOCK_MINUTES = 15
 RESET_CODE_MAX_FAILED_ATTEMPTS = 8
 RESET_CODE_WINDOW_MINUTES = 15
+ACTION_WINDOW_MINUTES = 15
+ACTION_MAX_ATTEMPTS = 6
 
 
 def _client_ip(request: Request) -> str | None:
     xff = request.headers.get("x-forwarded-for")
-    if xff:
+    if TRUST_PROXY_HEADERS and xff:
         return xff.split(",")[0].strip() or None
     if request.client and request.client.host:
         return request.client.host
@@ -109,6 +113,63 @@ def _register_login_attempt(
         db.commit()
     except Exception:
         db.rollback()
+
+
+def _reset_code_digest(code: str) -> str:
+    raw = str(code or "").strip()
+    return hmac.new(
+        JWT_SECRET.encode("utf-8"),
+        raw.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _action_rate_limited(
+    db: Session,
+    *,
+    request: Request,
+    reason: str,
+    correo: str | None = None,
+    max_attempts: int = ACTION_MAX_ATTEMPTS,
+    window_minutes: int = ACTION_WINDOW_MINUTES,
+) -> tuple[bool, int]:
+    now = _utcnow()
+    window_start = now - timedelta(minutes=window_minutes)
+    ip = _client_ip(request)
+    correo_norm = str(correo or "").strip().lower() or None
+
+    filters = [AuthLoginAttempt.reason == reason, AuthLoginAttempt.created_at >= window_start]
+    if ip and correo_norm:
+        filters.append((AuthLoginAttempt.ip_address == ip) | (AuthLoginAttempt.correo == correo_norm))
+    elif ip:
+        filters.append(AuthLoginAttempt.ip_address == ip)
+    elif correo_norm:
+        filters.append(AuthLoginAttempt.correo == correo_norm)
+    else:
+        return False, 0
+
+    count = int(
+        db.query(func.count(AuthLoginAttempt.id_attempt))
+        .filter(*filters)
+        .scalar()
+        or 0
+    )
+    if count < max_attempts:
+        return False, 0
+
+    last_attempt = (
+        db.query(func.max(AuthLoginAttempt.created_at))
+        .filter(*filters)
+        .scalar()
+    )
+    if not last_attempt:
+        return False, 0
+    if last_attempt.tzinfo is None:
+        last_attempt = last_attempt.replace(tzinfo=timezone.utc)
+    unlock_at = last_attempt + timedelta(minutes=window_minutes)
+    if unlock_at <= now:
+        return False, 0
+    return True, int((unlock_at - now).total_seconds())
 
 
 def _login_lock_status(db: Session, correo: str, request: Request) -> tuple[bool, int]:
@@ -364,7 +425,25 @@ def email_exists(correo: EmailStr, db: Session = Depends(get_db)):
 # -----------------------
 
 @router.post("/forgot-password")
-def forgot_password(payload: ForgotPasswordIn, db: Session = Depends(get_db)):
+def forgot_password(payload: ForgotPasswordIn, request: Request, db: Session = Depends(get_db)):
+    limited, retry_after = _action_rate_limited(
+        db,
+        request=request,
+        reason="FORGOT_PASSWORD_REQUEST",
+        correo=str(payload.correo),
+    )
+    if limited:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Demasiadas solicitudes. Intenta nuevamente en {max(retry_after, 1)} segundos.",
+        )
+    _register_login_attempt(
+        db,
+        correo=str(payload.correo),
+        request=request,
+        success=True,
+        reason="FORGOT_PASSWORD_REQUEST",
+    )
     user = db.query(Usuario).filter(Usuario.correo == payload.correo).first()
     if user:
         try:
@@ -396,13 +475,31 @@ def reset_password(payload: ResetPasswordIn, db: Session = Depends(get_db)):
 
 # --- Alternativa: cÃ³digo de 6 dÃ­gitos para restablecer ---
 @router.post("/forgot-password/code")
-def forgot_password_code(payload: ForgotPasswordIn, db: Session = Depends(get_db)):
+def forgot_password_code(payload: ForgotPasswordIn, request: Request, db: Session = Depends(get_db)):
+    limited, retry_after = _action_rate_limited(
+        db,
+        request=request,
+        reason="FORGOT_PASSWORD_CODE_REQUEST",
+        correo=str(payload.correo),
+    )
+    if limited:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Demasiadas solicitudes. Intenta nuevamente en {max(retry_after, 1)} segundos.",
+        )
+    _register_login_attempt(
+        db,
+        correo=str(payload.correo),
+        request=request,
+        success=True,
+        reason="FORGOT_PASSWORD_CODE_REQUEST",
+    )
     user = db.query(Usuario).filter(Usuario.correo == payload.correo).first()
     # Respuesta neutral: siempre se devuelve un token de flujo para evitar enumeraciÃ³n.
     fake_sub = 0
     fake_fp = _fp_password(secrets.token_urlsafe(24))
     fake_code = str(secrets.randbelow(1_000_000)).zfill(6)
-    flow_data = {"sub": fake_sub, "fp": fake_fp, "code": fake_code}
+    flow_data = {"sub": fake_sub, "fp": fake_fp, "ch": _reset_code_digest(fake_code)}
     if user:
         try:
             # Generar cÃ³digo 6 dÃ­gitos + token con fingerprint
@@ -410,7 +507,7 @@ def forgot_password_code(payload: ForgotPasswordIn, db: Session = Depends(get_db
             flow_data = {
                 "sub": user.id_usuario,
                 "fp": _fp_password(user.contrasena),
-                "code": code,
+                "ch": _reset_code_digest(code),
             }
             # Enviar correo con el cÃ³digo
             html = template_reset_code(user.nombre or "Usuario", code, RESET_PASS_EXPIRE_MIN)
@@ -439,9 +536,15 @@ def reset_password_code(payload: ResetPasswordCodeIn, request: Request, db: Sess
             reason="RESET_CODE_INVALID",
         )
         raise HTTPException(status_code=400, detail="Token invalido o expirado")
-    # Validar cÃ³digo
-    code_expected = (data.get("code") or "").strip()
-    if (payload.code or "").strip() != code_expected:
+    # Validar cÃ³digo (v2: digest firmado; v1: compatibilidad temporal con tokens antiguos)
+    provided_code = (payload.code or "").strip()
+    expected_digest = str(data.get("ch") or "").strip()
+    if expected_digest:
+        provided_digest = _reset_code_digest(provided_code)
+        code_ok = hmac.compare_digest(expected_digest, provided_digest)
+    else:
+        code_ok = provided_code == (str(data.get("code") or "").strip())
+    if not code_ok:
         _register_login_attempt(
             db,
             correo="__reset__",
@@ -480,7 +583,25 @@ def reset_password_code(payload: ResetPasswordCodeIn, request: Request, db: Sess
 
 
 @router.post("/pre-register")
-def pre_register(payload: RegisterIn, db: Session = Depends(get_db)):
+def pre_register(payload: RegisterIn, request: Request, db: Session = Depends(get_db)):
+    limited, retry_after = _action_rate_limited(
+        db,
+        request=request,
+        reason="PRE_REGISTER_REQUEST",
+        correo=str(payload.correo),
+    )
+    if limited:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Demasiadas solicitudes. Intenta nuevamente en {max(retry_after, 1)} segundos.",
+        )
+    _register_login_attempt(
+        db,
+        correo=str(payload.correo),
+        request=request,
+        success=True,
+        reason="PRE_REGISTER_REQUEST",
+    )
     exists = db.query(Usuario).filter(Usuario.correo == payload.correo).first()
     if exists:
         raise HTTPException(status_code=409, detail="Correo ya registrado")
@@ -500,7 +621,7 @@ def pre_register(payload: RegisterIn, db: Session = Depends(get_db)):
         "ciudad": payload.ciudad,
         # Seguridad: el preregistro pÃºblico nunca eleva privilegios.
         "rol": "MEDICO",
-        "code": code,
+        "ch": _reset_code_digest(code),
     }
     token = make_pre_register_token(data, VERIFY_EMAIL_EXPIRE_MIN)
     # Send email with verification code (no link)
@@ -517,8 +638,14 @@ def confirm_register_code(payload: ConfirmCodeIn, db: Session = Depends(get_db))
     data = parse_pre_register_token(payload.token)
     if not data:
         raise HTTPException(status_code=400, detail="Token invalido o expirado")
-    # Check 6-digit code
-    if (payload.code or "").strip() != (data.get("code") or "").strip():
+    # Check 6-digit code (v2: digest firmado; v1: compatibilidad temporal con tokens antiguos)
+    provided_code = (payload.code or "").strip()
+    expected_digest = str(data.get("ch") or "").strip()
+    if expected_digest:
+        code_ok = hmac.compare_digest(expected_digest, _reset_code_digest(provided_code))
+    else:
+        code_ok = provided_code == (str(data.get("code") or "").strip())
+    if not code_ok:
         raise HTTPException(status_code=400, detail="Codigo invalido o expirado")
     # Avoid duplicates
     if db.query(Usuario).filter(Usuario.correo == data.get("correo")).first():

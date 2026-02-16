@@ -4,6 +4,8 @@ import io
 import os
 import re
 import shutil
+import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -22,7 +24,7 @@ from app.services.som3d.totalsegmentator import TotalSegmentatorRunner
 from app.services.som3d.generator import NiftiToSTLConverter
 from sqlalchemy.orm import Session
 from ..db import get_db
-from ..core.security import get_current_user, get_current_user_optional
+from ..core.security import get_current_user, get_current_user_optional, require_admin
 from ..models import JobConv, JobSTL, Paciente, Medico, Usuario, VisorEstado
 from ..schemas import FinalizeJobIn, JobSTLOut, PatientJobSTLOut, JobSTLNoteUpdateIn
 from ..core.config import mysql_url
@@ -167,6 +169,161 @@ def _collect_nifti_root(ts_out_dir: Path) -> Path:
     return ts_out_dir
 
 
+def _to_int(v: Any, default: int = 0) -> int:
+    try:
+        if v is None or v == "":
+            return default
+        return int(float(v))
+    except Exception:
+        return default
+
+
+def _to_float(v: Any, default: float = 0.0) -> float:
+    try:
+        if v is None or v == "":
+            return default
+        return float(v)
+    except Exception:
+        return default
+
+
+def _summarize_conversion(conversion_out: Dict[str, Any] | None) -> Dict[str, Any]:
+    rows = (conversion_out or {}).get("results") or []
+    files_total = len(rows)
+    ok_rows = [r for r in rows if bool((r or {}).get("success"))]
+    files_ok = len(ok_rows)
+
+    verts_before_total = sum(_to_int((r or {}).get("verts_before")) for r in ok_rows)
+    verts_after_total = sum(_to_int((r or {}).get("verts_after")) for r in ok_rows)
+    faces_before_total = sum(_to_int((r or {}).get("faces_before")) for r in ok_rows)
+    faces_after_total = sum(_to_int((r or {}).get("faces_after")) for r in ok_rows)
+
+    vertices_reduced_total = max(0, verts_before_total - verts_after_total)
+    faces_reduced_total = max(0, faces_before_total - faces_after_total)
+    vertices_reduction_pct = (
+        (vertices_reduced_total / float(verts_before_total)) * 100.0 if verts_before_total > 0 else 0.0
+    )
+    faces_reduction_pct = (
+        (faces_reduced_total / float(faces_before_total)) * 100.0 if faces_before_total > 0 else 0.0
+    )
+
+    total_mesh_seconds = sum(_to_float((r or {}).get("seconds")) for r in ok_rows)
+    avg_mesh_seconds = (total_mesh_seconds / float(files_ok)) if files_ok > 0 else 0.0
+
+    return {
+        "files_total": int(files_total),
+        "files_ok": int(files_ok),
+        "vertices_before_total": int(verts_before_total),
+        "vertices_after_total": int(verts_after_total),
+        "vertices_reduced_total": int(vertices_reduced_total),
+        "vertices_reduction_pct": round(float(vertices_reduction_pct), 2),
+        "faces_before_total": int(faces_before_total),
+        "faces_after_total": int(faces_after_total),
+        "faces_reduced_total": int(faces_reduced_total),
+        "faces_reduction_pct": round(float(faces_reduction_pct), 2),
+        "mesh_seconds_total": round(float(total_mesh_seconds), 3),
+        "mesh_seconds_avg": round(float(avg_mesh_seconds), 3),
+    }
+
+
+def _probe_gpu_runtime() -> Dict[str, Any]:
+    out: Dict[str, Any] = {
+        "gpu_ready": False,
+        "gpu_detected": False,
+        "backend": "cpu",
+        "python": sys.version.split(" ")[0],
+        "cuda_visible_devices": os.getenv("CUDA_VISIBLE_DEVICES", ""),
+        "nvidia_smi": {
+            "available": False,
+            "error": None,
+            "devices": [],
+        },
+        "torch": {
+            "installed": False,
+            "cuda_available": False,
+            "cuda_version": None,
+            "device_count": 0,
+            "devices": [],
+            "error": None,
+        },
+        "cupy": {
+            "installed": False,
+            "cuda_available": False,
+            "device_count": 0,
+            "error": None,
+        },
+    }
+
+    # 1) Deteccion por driver/SO
+    try:
+        smi = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=name,memory.total,driver_version",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=6,
+        )
+        if smi.returncode == 0:
+            rows = [ln.strip() for ln in (smi.stdout or "").splitlines() if ln.strip()]
+            devices: list[dict[str, Any]] = []
+            for row in rows:
+                parts = [p.strip() for p in row.split(",")]
+                if len(parts) >= 3:
+                    devices.append(
+                        {
+                            "name": parts[0],
+                            "memory_mb": _to_int(parts[1], 0),
+                            "driver_version": parts[2],
+                        }
+                    )
+                else:
+                    devices.append({"raw": row})
+            out["nvidia_smi"]["available"] = bool(devices)
+            out["nvidia_smi"]["devices"] = devices
+        else:
+            err = (smi.stderr or smi.stdout or "").strip()
+            out["nvidia_smi"]["error"] = err or f"return_code={smi.returncode}"
+    except Exception as ex:
+        out["nvidia_smi"]["error"] = str(ex)
+
+    # 2) Deteccion por torch (si esta instalado)
+    try:
+        import torch  # type: ignore
+
+        out["torch"]["installed"] = True
+        out["torch"]["cuda_version"] = getattr(torch.version, "cuda", None)
+        cuda_ok = bool(torch.cuda.is_available())
+        out["torch"]["cuda_available"] = cuda_ok
+        if cuda_ok:
+            cnt = int(torch.cuda.device_count())
+            out["torch"]["device_count"] = cnt
+            out["torch"]["devices"] = [torch.cuda.get_device_name(i) for i in range(cnt)]
+    except Exception as ex:
+        out["torch"]["error"] = str(ex)
+
+    # 3) Deteccion por cupy (si esta instalado)
+    try:
+        import cupy as cp  # type: ignore
+
+        out["cupy"]["installed"] = True
+        cnt = int(cp.cuda.runtime.getDeviceCount())
+        out["cupy"]["device_count"] = cnt
+        out["cupy"]["cuda_available"] = cnt > 0
+    except Exception as ex:
+        out["cupy"]["error"] = str(ex)
+
+    smi_devices = out["nvidia_smi"]["devices"] or []
+    torch_cuda = bool(out["torch"]["cuda_available"])
+    cupy_cuda = bool(out["cupy"]["cuda_available"])
+    out["gpu_detected"] = bool(smi_devices) or torch_cuda or cupy_cuda
+    out["gpu_ready"] = torch_cuda or cupy_cuda
+    out["backend"] = "cuda" if out["gpu_ready"] else "cpu"
+    return out
+
+
 @dataclass
 class JobManifest:
     job_id: str
@@ -241,6 +398,7 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
     seg_seconds: Optional[float] = None
     conv_seconds: Optional[float] = None
     zip_seconds: Optional[float] = None
+    conversion_summary: Dict[str, Any] = {}
 
     def _fmt_dur(seconds: Optional[float]) -> str:
         try:
@@ -325,11 +483,6 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
         try:
             full = ("\n".join(log_buffer) + "\n").encode("utf-8") if log_buffer else b""
             s3.upload_bytes(full, s3_key(LOG_KEY), content_type="text/plain; charset=utf-8")
-            # Borrar manifest.json para dejar solo el job.log
-            try:
-                s3.delete(s3_key(MANIFEST_KEY))
-            except Exception:
-                pass
         except Exception:
             pass
 
@@ -389,9 +542,17 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
                 t_conv_start = time.time()
                 conv = NiftiToSTLConverter(progress_cb=lambda s: wlog(str(s)))
                 nifti_root = _collect_nifti_root(ts_out)
-                conv.convert_folder(nifti_root, stl_out, recursive=True)
+                conv_out = conv.convert_folder(nifti_root, stl_out, recursive=True)
+                conversion_summary = _summarize_conversion(conv_out)
                 conv_seconds = time.time() - (t_conv_start or time.time())
                 wlog(f"Conversión a STL finalizada. Tiempo conversión: {_fmt_dur(conv_seconds)}")
+                if conversion_summary.get("files_ok", 0) > 0:
+                    wlog(
+                        "Reducción de vértices (agregado): "
+                        f"{conversion_summary.get('vertices_before_total', 0):,} -> "
+                        f"{conversion_summary.get('vertices_after_total', 0):,} "
+                        f"({conversion_summary.get('vertices_reduction_pct', 0.0):.2f}%)"
+                    )
                 write_manifest_patch({"phase": "zipping", "percent": 90.0})
             except Exception as e:
                 save_worker_error("convert_to_stl", e)
@@ -428,6 +589,7 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
                 "metrics": {
                     "stl_count": stl_count,
                     "stl_zip_size": stl_zip_size,
+                    "mesh": conversion_summary,
                     "durations": {
                         "segment_seconds": float(seg_seconds or 0.0),
                         "convert_seconds": float(conv_seconds or 0.0),
@@ -451,11 +613,6 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
             try:
                 full = ("\n".join(log_buffer) + "\n").encode("utf-8") if log_buffer else b""
                 s3.upload_bytes(full, s3_key(LOG_KEY), content_type="text/plain; charset=utf-8")
-                # Borrar manifest.json para dejar solo el job.log
-                try:
-                    s3.delete(s3_key(MANIFEST_KEY))
-                except Exception:
-                    pass
             except Exception:
                 pass
 
@@ -623,9 +780,6 @@ async def create_job(
     return JSONResponse(content=manifest.to_dict(), status_code=201)
 
 
-from ..core.security import require_admin
-
-
 @router.get("/jobs")
 async def list_jobs(user = Depends(require_admin)):
     s3 = _ensure_s3()
@@ -650,6 +804,14 @@ async def list_jobs(user = Depends(require_admin)):
     return {"jobs": manifests}
 
 
+@router.get("/admin/gpu-check")
+async def admin_gpu_check(user=Depends(require_admin)):
+    """Diagnostico de reconocimiento de GPU para procesamiento 3D.
+    Solo disponible para ADMINISTRADOR.
+    """
+    return _probe_gpu_runtime()
+
+
 @router.get("/jobs/mine")
 async def list_my_jobs(db: Session = Depends(get_db), user = Depends(get_current_user)):
     """Lista solo los jobs creados por el usuario autenticado (JobConv.id_usuario).
@@ -660,12 +822,14 @@ async def list_my_jobs(db: Session = Depends(get_db), user = Depends(get_current
     items: List[Dict[str, Any]] = []
     for jc in entries:
         m = _load_manifest(jc.job_id)
+        status = (m.status if m else jc.status)
         items.append({
             "job_id": jc.job_id,
             "nombre_proceso": getattr(jc, "queue_name", None),
-            "status": (m.status if m else jc.status),
+            "status": status,
             "phase": (m.phase if m else None),
-            "percent": (m.percent if m else (100.0 if jc.status == "DONE" else 0.0)),
+            "percent": (m.percent if m else (100.0 if status == "DONE" else 0.0)),
+            "metrics": (m.metrics if m else {}),
             "updated_at": getattr(jc, "updated_at", None),
         })
     return {"jobs": items}
@@ -694,6 +858,7 @@ async def list_my_jobs_tracking(db: Session = Depends(get_db), user = Depends(ge
             "status": status,
             "phase": (m.phase if m else None),
             "percent": (m.percent if m else (100.0 if status == "DONE" else 0.0)),
+            "metrics": (m.metrics if m else {}),
             "is_processing": str(status).upper() in ("QUEUED", "RUNNING"),
             "owner": {
                 "id_usuario": u.id_usuario,
@@ -728,6 +893,7 @@ async def list_jobs_tracking(db: Session = Depends(get_db), user=Depends(require
             "status": status,
             "phase": (m.phase if m else None),
             "percent": (m.percent if m else (100.0 if status == "DONE" else 0.0)),
+            "metrics": (m.metrics if m else {}),
             "is_processing": str(status).upper() in ("QUEUED", "RUNNING"),
             "owner": {
                 "id_usuario": u.id_usuario,

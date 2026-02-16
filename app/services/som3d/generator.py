@@ -456,6 +456,8 @@ class NiftiToSTLConverter:
                 stl_orig_bytes = out_stl_orig.stat().st_size if out_stl_orig.exists() else 0
                 stl_orig_hr = _fmt_size(stl_orig_bytes)
 
+                verts_before = int(verts.shape[0])
+                verts_after = int(verts.shape[0])
                 faces_after = faces.shape[0]
                 out_hq = ""
                 stl_hq_bytes = 0
@@ -533,6 +535,7 @@ class NiftiToSTLConverter:
                             preserve_topology=preserve_topo
                         )
                         faces_after = metrics["faces_after"]
+                        verts_after = int(metrics.get("verts_after") or verts_after)
                         out_hq = str(out_stl_hq)
 
                         stl_hq_bytes = out_stl_hq.stat().st_size if out_stl_hq.exists() else 0
@@ -591,6 +594,8 @@ class NiftiToSTLConverter:
                     "success": True,
                     "method": method,
                     "auto_t": f"{t:.3f}",
+                    "verts_before": verts_before,
+                    "verts_after": verts_after,
                     "faces_before": faces.shape[0],
                     "faces_after": faces_after,
                     "voxels_mask": voxels,
@@ -609,7 +614,7 @@ class NiftiToSTLConverter:
                 self._log(f"FAIL | {elapsed:.2f}s | {exc}\n")
                 results.append({
                     "file": str(f), "name": f.name, "success": False, "method": "auto",
-                    "auto_t": "", "faces_before": "", "faces_after": "", "voxels_mask": "",
+                    "auto_t": "", "verts_before": "", "verts_after": "", "faces_before": "", "faces_after": "", "voxels_mask": "",
                     "stl": "", "stl_size_bytes": "", "stl_size_hr": "",
                     "stl_reduced": "", "stl_reduced_size_bytes": "", "stl_reduced_size_hr": "",
                     "size_saving_pct": "",

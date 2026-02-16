@@ -1,4 +1,7 @@
 from datetime import datetime, timedelta
+import os
+import subprocess
+import sys
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
@@ -15,6 +18,91 @@ router = APIRouter()
 def _ensure_admin(user):
     if getattr(user, "rol", None) != "ADMINISTRADOR":
         raise HTTPException(status_code=403, detail="Requiere rol ADMINISTRADOR")
+
+
+@router.get("/admin/gpu-check")
+def admin_gpu_check(user=Depends(get_current_user)):
+    _ensure_admin(user)
+    out = {
+        "gpu_ready": False,
+        "gpu_detected": False,
+        "backend": "cpu",
+        "python": sys.version.split(" ")[0],
+        "cuda_visible_devices": os.getenv("CUDA_VISIBLE_DEVICES", ""),
+        "nvidia_smi": {"available": False, "error": None, "devices": []},
+        "torch": {
+            "installed": False,
+            "cuda_available": False,
+            "cuda_version": None,
+            "device_count": 0,
+            "devices": [],
+            "error": None,
+        },
+        "cupy": {
+            "installed": False,
+            "cuda_available": False,
+            "device_count": 0,
+            "error": None,
+        },
+    }
+
+    try:
+        smi = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            timeout=6,
+        )
+        if smi.returncode == 0:
+            rows = [ln.strip() for ln in (smi.stdout or "").splitlines() if ln.strip()]
+            devices = []
+            for row in rows:
+                parts = [p.strip() for p in row.split(",")]
+                if len(parts) >= 3:
+                    devices.append(
+                        {
+                            "name": parts[0],
+                            "memory_mb": int(float(parts[1])) if parts[1] else 0,
+                            "driver_version": parts[2],
+                        }
+                    )
+                else:
+                    devices.append({"raw": row})
+            out["nvidia_smi"]["available"] = bool(devices)
+            out["nvidia_smi"]["devices"] = devices
+        else:
+            out["nvidia_smi"]["error"] = (smi.stderr or smi.stdout or "").strip() or f"return_code={smi.returncode}"
+    except Exception as ex:
+        out["nvidia_smi"]["error"] = str(ex)
+
+    try:
+        import torch  # type: ignore
+
+        out["torch"]["installed"] = True
+        out["torch"]["cuda_version"] = getattr(torch.version, "cuda", None)
+        cuda_ok = bool(torch.cuda.is_available())
+        out["torch"]["cuda_available"] = cuda_ok
+        if cuda_ok:
+            cnt = int(torch.cuda.device_count())
+            out["torch"]["device_count"] = cnt
+            out["torch"]["devices"] = [torch.cuda.get_device_name(i) for i in range(cnt)]
+    except Exception as ex:
+        out["torch"]["error"] = str(ex)
+
+    try:
+        import cupy as cp  # type: ignore
+
+        out["cupy"]["installed"] = True
+        cnt = int(cp.cuda.runtime.getDeviceCount())
+        out["cupy"]["device_count"] = cnt
+        out["cupy"]["cuda_available"] = cnt > 0
+    except Exception as ex:
+        out["cupy"]["error"] = str(ex)
+
+    out["gpu_detected"] = bool(out["nvidia_smi"]["devices"]) or bool(out["torch"]["cuda_available"]) or bool(out["cupy"]["cuda_available"])
+    out["gpu_ready"] = bool(out["torch"]["cuda_available"]) or bool(out["cupy"]["cuda_available"])
+    out["backend"] = "cuda" if out["gpu_ready"] else "cpu"
+    return out
 
 
 @router.get("/admin/metrics")

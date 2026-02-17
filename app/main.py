@@ -31,10 +31,16 @@ except Exception:
 
 from .core.config import FRONTEND_ORIGINS
 from .core.health import ensure_services_ready, run_health_checks
+from .db import ensure_runtime_tables
 
 app = FastAPI(title="SOM3D Backend", version="1.0.0")
 
-_cors_origins = FRONTEND_ORIGINS if FRONTEND_ORIGINS else ["*"]
+_cors_origins = FRONTEND_ORIGINS if FRONTEND_ORIGINS else [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:5500",
+    "http://127.0.0.1:5500",
+]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
@@ -49,27 +55,59 @@ app.include_router(plans_router, tags=["plans"])
 app.include_router(subs_router, tags=["subscriptions"])
 app.include_router(epayco_router)  # /epayco/...
 app.include_router(som3d_router)   # /som3d/...
-app.include_router(patients_router)  # /patients
-app.include_router(studies_router)   # /studies
-app.include_router(visor_router)     # /visor
-app.include_router(hospitals_router) # /hospitals
-app.include_router(doctors_router)   # /admin/doctors
-app.include_router(admin_router)     # /admin/metrics
-app.include_router(admin_hospitals_router)  # /admin/hospitals
-app.include_router(admin_users_router)      # /admin/users
+app.include_router(patients_router, tags=["patients"])  # /patients
+app.include_router(studies_router, tags=["studies"])   # /studies
+app.include_router(visor_router, tags=["visor"])       # /visor
+app.include_router(hospitals_router, tags=["hospitals"]) # /hospitals
+app.include_router(doctors_router, tags=["doctors"])   # /admin/doctors
+app.include_router(admin_router, tags=["admin"])       # /admin/metrics
+app.include_router(admin_hospitals_router, tags=["admin-hospitals"])  # /admin/hospitals
+app.include_router(admin_users_router, tags=["admin-users"])      # /admin/users
 app.include_router(mensajes_router)
 
 # Static files (admin dashboard)
 static_dir = os.path.join(os.path.dirname(__file__), "static")
-if os.path.isdir(static_dir):
-    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+os.makedirs(static_dir, exist_ok=True)
+app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+
+@app.middleware("http")
+async def add_security_headers(request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    path = request.url.path or ""
+    is_docs_ui = path.startswith("/docs") or path.startswith("/redoc")
+    if is_docs_ui:
+        # Swagger/ReDoc cargan assets desde cdn.jsdelivr.net por defecto.
+        csp = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+            "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+            "img-src 'self' data: https://fastapi.tiangolo.com; "
+            "font-src 'self' data: https://cdn.jsdelivr.net; "
+            "object-src 'none'; frame-ancestors 'none'; base-uri 'self'"
+        )
+    else:
+        csp = (
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; object-src 'none'; "
+            "frame-ancestors 'none'; base-uri 'self'"
+        )
+    response.headers.setdefault("Content-Security-Policy", csp)
+    if request.url.scheme == "https":
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return response
 
 @app.on_event("startup")
 async def startup_healthcheck():
     # Ensure critical dependencies are available before serving traffic
+    ensure_runtime_tables()
     ensure_services_ready()
 
-@app.get("/health")
+@app.get("/health", tags=["health"])
 def health():
     services = run_health_checks()
     overall = "ok" if all(s.get("status") == "ok" for s in services.values()) else "error"

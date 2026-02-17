@@ -139,3 +139,25 @@ def template_verify_code(nombre: str, code: str, expire_min: int) -> str:
         + _esc(str(expire_min)) + " minutos.</p>"
     )
     return _shell_html("Verifica tu correo — 3DVinci Health", body)
+
+
+def template_payment_confirm(
+    nombre: str,
+    plan_nombre: str,
+    monto: str,
+    referencia: str,
+    fecha_iso: str | None = None,
+) -> str:
+    fecha_txt = _esc(fecha_iso or datetime.now().isoformat(timespec="seconds"))
+    body = (
+        "<h1>Pago confirmado</h1>"
+        "<p class='lead'>Hola " + _esc(nombre) + ", tu pago fue aprobado correctamente.</p>"
+        "<div class='code-wrap' style='max-width:520px;text-align:left'>"
+        "<p><span class='bold'>Plan:</span> " + _esc(plan_nombre) + "</p>"
+        "<p><span class='bold'>Monto:</span> " + _esc(monto) + "</p>"
+        "<p><span class='bold'>Referencia:</span> " + _esc(referencia) + "</p>"
+        "<p><span class='bold'>Fecha:</span> " + fecha_txt + "</p>"
+        "</div>"
+        "<p class='muted' style='text-align:center'>Tu suscripción quedó activada.</p>"
+    )
+    return _shell_html("Pago confirmado — 3DVinci Health", body)

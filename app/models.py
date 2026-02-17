@@ -109,6 +109,7 @@ class Estudio(Base):
     modalidad: Mapped[str | None] = mapped_column(String(20))
     fecha_estudio: Mapped[datetime] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False)
     descripcion: Mapped[str | None] = mapped_column(String(200))
+    notas: Mapped[str | None] = mapped_column(Text)
     creado_en: Mapped[str] = mapped_column(TIMESTAMP, server_default=text("CURRENT_TIMESTAMP"))
     actualizado_en: Mapped[str] = mapped_column(TIMESTAMP, server_default=text("CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"))
 
@@ -135,9 +136,10 @@ class JobSTL(Base):
     __tablename__ = "JobSTL"
     id_jobstl: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     job_id: Mapped[str] = mapped_column(ForeignKey("JobConv.job_id"), nullable=False)
-    id_paciente: Mapped[int] = mapped_column(ForeignKey("Paciente.id_paciente"), nullable=False)
+    id_paciente: Mapped[int | None] = mapped_column(ForeignKey("Paciente.id_paciente"), nullable=True)
     stl_size: Mapped[int | None] = mapped_column(BigInteger)
     num_stl_archivos: Mapped[int | None] = mapped_column(Integer)
+    notas: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[str] = mapped_column(TIMESTAMP, server_default=text("CURRENT_TIMESTAMP"))
     updated_at: Mapped[str] = mapped_column(TIMESTAMP, server_default=text("CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"))
 
@@ -146,7 +148,7 @@ class VisorEstado(Base):
     __tablename__ = "VisorEstado"
     id_visor_estado: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     id_medico: Mapped[int] = mapped_column(ForeignKey("Medico.id_medico"), nullable=False)
-    id_paciente: Mapped[int] = mapped_column(ForeignKey("Paciente.id_paciente"), nullable=False)
+    id_paciente: Mapped[int | None] = mapped_column(ForeignKey("Paciente.id_paciente"), nullable=True)
     id_jobstl: Mapped[int | None] = mapped_column(ForeignKey("JobSTL.id_jobstl"))
     titulo: Mapped[str] = mapped_column(String(200), nullable=False)
     descripcion: Mapped[str | None] = mapped_column(String(400))
@@ -186,3 +188,110 @@ class Mensaje(Base):
     # tiempos
     creado_en: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     actualizado_en: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class HospitalCode(Base):
+    __tablename__ = "HospitalCode"
+
+    id_hospital_code: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id_hospital: Mapped[int] = mapped_column(ForeignKey("Hospital.id_hospital"), nullable=False)
+    codigo: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
+    creado_por_id_usuario: Mapped[int | None] = mapped_column(ForeignKey("Usuario.id_usuario"), nullable=True)
+    usado_por_id_medico: Mapped[int | None] = mapped_column(ForeignKey("Medico.id_medico"), nullable=True)
+    expires_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    used_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class ClinicalAudit(Base):
+    __tablename__ = "ClinicalAudit"
+
+    id_audit: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    entity_type: Mapped[str] = mapped_column(String(32), nullable=False)  # PACIENTE | ESTUDIO
+    entity_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    action: Mapped[str] = mapped_column(String(20), nullable=False)  # CREATE | UPDATE | DELETE
+    actor_id_usuario: Mapped[int | None] = mapped_column(ForeignKey("Usuario.id_usuario"), nullable=True)
+    before_json: Mapped[str | None] = mapped_column(Text)
+    after_json: Mapped[str | None] = mapped_column(Text)
+    meta_json: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class MensajeGestion(Base):
+    __tablename__ = "mensaje_gestion"
+
+    id_mensaje: Mapped[int] = mapped_column(ForeignKey("mensaje.id_mensaje"), primary_key=True)
+    asignado_admin_id_usuario: Mapped[int | None] = mapped_column(ForeignKey("Usuario.id_usuario"), nullable=True)
+    creado_en: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    actualizado_en: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class MensajeEvento(Base):
+    __tablename__ = "mensaje_evento"
+
+    id_evento: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id_mensaje: Mapped[int] = mapped_column(ForeignKey("mensaje.id_mensaje"), nullable=False)
+    id_actor_usuario: Mapped[int | None] = mapped_column(ForeignKey("Usuario.id_usuario"), nullable=True)
+    accion: Mapped[str] = mapped_column(String(40), nullable=False)
+    detalle_json: Mapped[str | None] = mapped_column(Text)
+    creado_en: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class AuthLoginAttempt(Base):
+    __tablename__ = "auth_login_attempt"
+
+    id_attempt: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    correo: Mapped[str] = mapped_column(String(100), nullable=False)
+    ip_address: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    success: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    reason: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class AuthRefreshSession(Base):
+    __tablename__ = "auth_refresh_session"
+
+    id_session: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id_usuario: Mapped[int] = mapped_column(ForeignKey("Usuario.id_usuario"), nullable=False)
+    jti: Mapped[str] = mapped_column(String(96), unique=True, nullable=False)
+    fp: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    ip_address: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    expires_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    replaced_by_jti: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    last_used_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class PaymentWebhookEvent(Base):
+    __tablename__ = "payment_webhook_event"
+
+    id_event: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ref_payco: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
+    transaction_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    estado: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    firma_valida: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    processed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class ClinicalNote(Base):
+    __tablename__ = "clinical_note"
+
+    id_note: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id_paciente: Mapped[int] = mapped_column(ForeignKey("Paciente.id_paciente"), nullable=False)
+    id_medico: Mapped[int] = mapped_column(ForeignKey("Medico.id_medico"), nullable=False)
+    segmento: Mapped[str] = mapped_column(String(60), nullable=False, server_default="GENERAL")
+    texto: Mapped[str] = mapped_column(Text, nullable=False)
+    anchor_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)

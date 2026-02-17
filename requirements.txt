@@ -1,4 +1,4 @@
-# --- Web/API ---
+# Core API
 fastapi==0.110.0
 uvicorn[standard]==0.27.1
 python-multipart==0.0.20
@@ -8,31 +8,34 @@ pydantic>=2.5
 email-validator>=2.1
 PyJWT>=2.8
 
-# --- Base de datos ---
+# Database
 SQLAlchemy>=2.0
 PyMySQL>=1.1
 python-dateutil>=2.8
 
-# --- Sistema / utilidades ---
+# System utilities
 psutil==5.9.8
 bcrypt>=4.0
 
-# --- S3 / cloud ---
+# S3/MinIO
 boto3
 
-# --- NumPy stack (evita NumPy 2.x) ---
+# Numeric and medical imaging
 numpy==1.26.4
 nibabel==5.1.0
 scikit-image==0.22.0
-
-# --- DICOM ---
 pydicom==2.4.4
 dicom2nifti==2.4.10
 
-# --- STL / mallas ---
+# Mesh and STL
 numpy-stl==3.0.0
 vtk==9.3.0
 pymeshlab==2023.12
 
-# --- Segmentación ---
+# Segmentation
 TotalSegmentator==2.11.0
+
+# NOTE:
+# torch/torchvision/torchaudio are installed in Dockerfile
+# (CUDA on gpu stage, CPU wheels on cpu stage).
+# cupy-cuda12x is installed only in gpu stage.

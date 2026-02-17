@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import shutil
+import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -21,13 +24,64 @@ from app.services.som3d.totalsegmentator import TotalSegmentatorRunner
 from app.services.som3d.generator import NiftiToSTLConverter
 from sqlalchemy.orm import Session
 from ..db import get_db
-from ..core.security import get_current_user, get_current_user_optional
-from ..models import JobConv, JobSTL, Paciente, Medico, Usuario
-from ..schemas import FinalizeJobIn, JobSTLOut, PatientJobSTLOut
+from ..core.security import get_current_user, get_current_user_optional, require_admin
+from ..models import JobConv, JobSTL, Paciente, Medico, Usuario, VisorEstado
+from ..schemas import FinalizeJobIn, JobSTLOut, PatientJobSTLOut, JobSTLNoteUpdateIn
 from ..core.config import mysql_url
 
 
 router = APIRouter(prefix="/som3d", tags=["som3d"])
+
+
+def _is_admin(user: Any) -> bool:
+    return str(getattr(user, "rol", "")).upper() == "ADMINISTRADOR"
+
+
+def _is_medico(user: Any) -> bool:
+    return str(getattr(user, "rol", "")).upper() == "MEDICO"
+
+
+def _ensure_job_access(db: Session, user: Any, job_id: str) -> None:
+    if _is_admin(user):
+        return
+    owner = (
+        db.query(JobConv.job_id)
+        .filter(JobConv.job_id == job_id, JobConv.id_usuario == user.id_usuario)
+        .first()
+    )
+    if not owner:
+        # Evita filtrar existencia de jobs de terceros.
+        raise HTTPException(status_code=404, detail="Job no encontrado")
+
+
+def _get_jobstl_owned(db: Session, user: Any, id_jobstl: int) -> JobSTL:
+    js = db.query(JobSTL).filter(JobSTL.id_jobstl == id_jobstl).first()
+    if not js:
+        raise HTTPException(status_code=404, detail="Caso 3D no encontrado")
+    if _is_admin(user):
+        return js
+    if js.id_paciente is None:
+        raise HTTPException(status_code=403, detail="No autorizado")
+    p = db.query(Paciente).filter(Paciente.id_paciente == js.id_paciente).first()
+    med = db.query(Medico).filter(Medico.id_usuario == user.id_usuario).first()
+    if not p or not med or p.id_medico != med.id_medico:
+        raise HTTPException(status_code=403, detail="No autorizado")
+    return js
+
+
+def _delete_job_artifacts_s3(job_id: str) -> int:
+    """Elimina todos los objetos del job en S3/MinIO."""
+    s3 = _ensure_s3()
+    base_key = _s3_job_base(job_id)
+    keys = s3.list(base_key)
+    for key in keys:
+        s3.delete(key)
+    # Borra tambien un posible objeto "folder marker" del prefijo base.
+    try:
+        s3.delete(base_key)
+    except Exception:
+        pass
+    return len(keys)
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -45,6 +99,9 @@ LOG_KEY = "job.log"
 MANIFEST_KEY = "manifest.json"
 INPUT_ZIP = "input.zip"
 RESULT_ZIP = "stl_result.zip"
+MAX_UPLOAD_MB = max(1, int(os.getenv("SOM3D_MAX_UPLOAD_MB", "1024")))
+MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
+_RE_PROCESS_NAME = re.compile("^[A-Za-z\\u00C0-\\u00FF0-9()_., -]{3,80}$")
 
 
 def _ensure_s3() -> S3Manager:
@@ -81,6 +138,17 @@ def _now_ts() -> float:
     return time.time()
 
 
+def _safe_upload_filename(filename: str) -> str:
+    raw = str(filename or "").replace("\\", "/")
+    base = raw.split("/")[-1].strip().replace("\x00", "")
+    if not base or base in {".", ".."}:
+        return "upload.zip"
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", base)
+    if not safe.lower().endswith(".zip"):
+        safe += ".zip"
+    return safe
+
+
 def _zip_dir_to_bytes(dir_path: Path) -> bytes:
     mem = io.BytesIO()
     with tempfile.TemporaryDirectory(prefix="stl_zip_") as td:
@@ -99,6 +167,189 @@ def _collect_nifti_root(ts_out_dir: Path) -> Path:
         if sub.is_dir() and any(sub.rglob("*.nii.gz")):
             return sub
     return ts_out_dir
+
+
+def _to_int(v: Any, default: int = 0) -> int:
+    try:
+        if v is None or v == "":
+            return default
+        return int(float(v))
+    except Exception:
+        return default
+
+
+def _to_float(v: Any, default: float = 0.0) -> float:
+    try:
+        if v is None or v == "":
+            return default
+        return float(v)
+    except Exception:
+        return default
+
+
+def _summarize_conversion(conversion_out: Dict[str, Any] | None) -> Dict[str, Any]:
+    rows = (conversion_out or {}).get("results") or []
+    files_total = len(rows)
+    ok_rows = [r for r in rows if bool((r or {}).get("success"))]
+    files_ok = len(ok_rows)
+
+    verts_before_total = sum(_to_int((r or {}).get("verts_before")) for r in ok_rows)
+    verts_after_total = sum(_to_int((r or {}).get("verts_after")) for r in ok_rows)
+    faces_before_total = sum(_to_int((r or {}).get("faces_before")) for r in ok_rows)
+    faces_after_total = sum(_to_int((r or {}).get("faces_after")) for r in ok_rows)
+
+    vertices_reduced_total = max(0, verts_before_total - verts_after_total)
+    faces_reduced_total = max(0, faces_before_total - faces_after_total)
+    vertices_reduction_pct = (
+        (vertices_reduced_total / float(verts_before_total)) * 100.0 if verts_before_total > 0 else 0.0
+    )
+    faces_reduction_pct = (
+        (faces_reduced_total / float(faces_before_total)) * 100.0 if faces_before_total > 0 else 0.0
+    )
+
+    total_mesh_seconds = sum(_to_float((r or {}).get("seconds")) for r in ok_rows)
+    avg_mesh_seconds = (total_mesh_seconds / float(files_ok)) if files_ok > 0 else 0.0
+
+    return {
+        "files_total": int(files_total),
+        "files_ok": int(files_ok),
+        "vertices_before_total": int(verts_before_total),
+        "vertices_after_total": int(verts_after_total),
+        "vertices_reduced_total": int(vertices_reduced_total),
+        "vertices_reduction_pct": round(float(vertices_reduction_pct), 2),
+        "faces_before_total": int(faces_before_total),
+        "faces_after_total": int(faces_after_total),
+        "faces_reduced_total": int(faces_reduced_total),
+        "faces_reduction_pct": round(float(faces_reduction_pct), 2),
+        "mesh_seconds_total": round(float(total_mesh_seconds), 3),
+        "mesh_seconds_avg": round(float(avg_mesh_seconds), 3),
+    }
+
+
+def _probe_gpu_runtime() -> Dict[str, Any]:
+    out: Dict[str, Any] = {
+        "gpu_ready": False,
+        "gpu_detected": False,
+        "backend": "cpu",
+        "post_restart_check": {
+            "title": "Reiniciar backend y verificar",
+            "command": 'python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.device_count())"',
+            "output": "",
+            "ok": False,
+            "error": None,
+        },
+        "python": sys.version.split(" ")[0],
+        "cuda_visible_devices": os.getenv("CUDA_VISIBLE_DEVICES", ""),
+        "nvidia_smi": {
+            "available": False,
+            "error": None,
+            "devices": [],
+        },
+        "torch": {
+            "installed": False,
+            "cuda_available": False,
+            "cuda_version": None,
+            "device_count": 0,
+            "devices": [],
+            "error": None,
+        },
+        "cupy": {
+            "installed": False,
+            "cuda_available": False,
+            "device_count": 0,
+            "error": None,
+        },
+    }
+
+    # 1) Deteccion por driver/SO
+    try:
+        smi = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=name,memory.total,driver_version",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=6,
+        )
+        if smi.returncode == 0:
+            rows = [ln.strip() for ln in (smi.stdout or "").splitlines() if ln.strip()]
+            devices: list[dict[str, Any]] = []
+            for row in rows:
+                parts = [p.strip() for p in row.split(",")]
+                if len(parts) >= 3:
+                    devices.append(
+                        {
+                            "name": parts[0],
+                            "memory_mb": _to_int(parts[1], 0),
+                            "driver_version": parts[2],
+                        }
+                    )
+                else:
+                    devices.append({"raw": row})
+            out["nvidia_smi"]["available"] = bool(devices)
+            out["nvidia_smi"]["devices"] = devices
+        else:
+            err = (smi.stderr or smi.stdout or "").strip()
+            out["nvidia_smi"]["error"] = err or f"return_code={smi.returncode}"
+    except Exception as ex:
+        out["nvidia_smi"]["error"] = str(ex)
+
+    # 2) Deteccion por torch (si esta instalado)
+    try:
+        import torch  # type: ignore
+
+        out["torch"]["installed"] = True
+        out["torch"]["cuda_version"] = getattr(torch.version, "cuda", None)
+        cuda_ok = bool(torch.cuda.is_available())
+        out["torch"]["cuda_available"] = cuda_ok
+        if cuda_ok:
+            cnt = int(torch.cuda.device_count())
+            out["torch"]["device_count"] = cnt
+            out["torch"]["devices"] = [torch.cuda.get_device_name(i) for i in range(cnt)]
+    except Exception as ex:
+        out["torch"]["error"] = str(ex)
+
+    # 3) Deteccion por cupy (si esta instalado)
+    try:
+        import cupy as cp  # type: ignore
+
+        out["cupy"]["installed"] = True
+        cnt = int(cp.cuda.runtime.getDeviceCount())
+        out["cupy"]["device_count"] = cnt
+        out["cupy"]["cuda_available"] = cnt > 0
+    except Exception as ex:
+        out["cupy"]["error"] = str(ex)
+
+    smi_devices = out["nvidia_smi"]["devices"] or []
+    torch_cuda = bool(out["torch"]["cuda_available"])
+    cupy_cuda = bool(out["cupy"]["cuda_available"])
+    out["gpu_detected"] = bool(smi_devices) or torch_cuda or cupy_cuda
+    out["gpu_ready"] = torch_cuda or cupy_cuda
+    out["backend"] = "cuda" if out["gpu_ready"] else "cpu"
+
+    # 4) Verificacion post-reinicio (salida real del comando sugerido)
+    try:
+        chk = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.device_count())",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+        cmd_out = (chk.stdout or "").strip()
+        cmd_err = (chk.stderr or "").strip()
+        out["post_restart_check"]["output"] = cmd_out
+        out["post_restart_check"]["ok"] = chk.returncode == 0
+        out["post_restart_check"]["error"] = cmd_err or (None if chk.returncode == 0 else f"return_code={chk.returncode}")
+    except Exception as ex:
+        out["post_restart_check"]["ok"] = False
+        out["post_restart_check"]["error"] = str(ex)
+    return out
 
 
 @dataclass
@@ -175,6 +426,7 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
     seg_seconds: Optional[float] = None
     conv_seconds: Optional[float] = None
     zip_seconds: Optional[float] = None
+    conversion_summary: Dict[str, Any] = {}
 
     def _fmt_dur(seconds: Optional[float]) -> str:
         try:
@@ -259,11 +511,6 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
         try:
             full = ("\n".join(log_buffer) + "\n").encode("utf-8") if log_buffer else b""
             s3.upload_bytes(full, s3_key(LOG_KEY), content_type="text/plain; charset=utf-8")
-            # Borrar manifest.json para dejar solo el job.log
-            try:
-                s3.delete(s3_key(MANIFEST_KEY))
-            except Exception:
-                pass
         except Exception:
             pass
 
@@ -323,9 +570,17 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
                 t_conv_start = time.time()
                 conv = NiftiToSTLConverter(progress_cb=lambda s: wlog(str(s)))
                 nifti_root = _collect_nifti_root(ts_out)
-                conv.convert_folder(nifti_root, stl_out, recursive=True)
+                conv_out = conv.convert_folder(nifti_root, stl_out, recursive=True)
+                conversion_summary = _summarize_conversion(conv_out)
                 conv_seconds = time.time() - (t_conv_start or time.time())
                 wlog(f"Conversión a STL finalizada. Tiempo conversión: {_fmt_dur(conv_seconds)}")
+                if conversion_summary.get("files_ok", 0) > 0:
+                    wlog(
+                        "Reducción de vértices (agregado): "
+                        f"{conversion_summary.get('vertices_before_total', 0):,} -> "
+                        f"{conversion_summary.get('vertices_after_total', 0):,} "
+                        f"({conversion_summary.get('vertices_reduction_pct', 0.0):.2f}%)"
+                    )
                 write_manifest_patch({"phase": "zipping", "percent": 90.0})
             except Exception as e:
                 save_worker_error("convert_to_stl", e)
@@ -362,6 +617,7 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
                 "metrics": {
                     "stl_count": stl_count,
                     "stl_zip_size": stl_zip_size,
+                    "mesh": conversion_summary,
                     "durations": {
                         "segment_seconds": float(seg_seconds or 0.0),
                         "convert_seconds": float(conv_seconds or 0.0),
@@ -385,18 +641,13 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
             try:
                 full = ("\n".join(log_buffer) + "\n").encode("utf-8") if log_buffer else b""
                 s3.upload_bytes(full, s3_key(LOG_KEY), content_type="text/plain; charset=utf-8")
-                # Borrar manifest.json para dejar solo el job.log
-                try:
-                    s3.delete(s3_key(MANIFEST_KEY))
-                except Exception:
-                    pass
             except Exception:
                 pass
 
-            # Registrar JobSTL en BD si hay db_url y un paciente asociado en params
+            # Registrar JobSTL en BD (con o sin paciente)
             try:
                 pid = params.get("id_paciente") if isinstance(params, dict) else None
-                if db_url and pid:
+                if db_url:
                     engine = create_engine(db_url, pool_pre_ping=True, future=True)
                     with engine.begin() as conn:
                         conn.execute(
@@ -406,7 +657,7 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
                             ),
                             {
                                 "job_id": job_id,
-                                "id_paciente": int(pid),
+                                "id_paciente": (int(pid) if pid is not None else None),
                                 "stl_size": int(stl_zip_size),
                                 "num": int(stl_count),
                             },
@@ -421,6 +672,7 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
 @router.post("/jobs")
 async def create_job(
     file: UploadFile = File(..., description=".zip con DICOMs"),
+    nombre_proceso: Optional[str] = Form(None),
     enable_ortopedia: bool = Form(False),
     enable_appendicular: bool = Form(False),
     enable_muscles: bool = Form(False),
@@ -436,19 +688,43 @@ async def create_job(
     _require_s3_env()
     if not file.filename or not file.filename.lower().endswith(".zip"):
         raise HTTPException(status_code=400, detail="Se espera un .zip con DICOMs")
+    process_name = (nombre_proceso or "").strip()
+    if process_name and len(process_name) > 80:
+        raise HTTPException(status_code=400, detail="nombre_proceso no puede superar 80 caracteres")
+    if process_name:
+        process_name = re.sub(r"\s{2,}", " ", process_name).replace("<", "").replace(">", "")
+        if not _RE_PROCESS_NAME.fullmatch(process_name):
+            raise HTTPException(status_code=422, detail="nombre_proceso invalido")
 
     s3 = _ensure_s3()
     job_id = uuid.uuid4().hex
     s3_prefix = _s3_job_base(job_id)
 
     # Guardar ZIP en temporal local y NO subir a S3
-    local_tmp = Path(tempfile.mkdtemp(prefix=f"upload_{job_id}_")) / file.filename
-    with local_tmp.open("wb") as f:
-        while True:
-            chunk = await file.read(2 * 1024 * 1024)
-            if not chunk:
-                break
-            f.write(chunk)
+    tmp_dir = Path(tempfile.mkdtemp(prefix=f"upload_{job_id}_"))
+    safe_upload_name = _safe_upload_filename(file.filename or "")
+    local_tmp = tmp_dir / safe_upload_name
+    bytes_written = 0
+    try:
+        with local_tmp.open("wb") as f:
+            while True:
+                chunk = await file.read(2 * 1024 * 1024)
+                if not chunk:
+                    break
+                bytes_written += len(chunk)
+                if bytes_written > MAX_UPLOAD_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"El ZIP supera el limite permitido de {MAX_UPLOAD_MB}MB",
+                    )
+                f.write(chunk)
+    except HTTPException:
+        try:
+            local_tmp.unlink(missing_ok=True)
+            tmp_dir.rmdir()
+        except Exception:
+            pass
+        raise
 
     extra_list: List[str] = []
     if extra_tasks:
@@ -468,6 +744,7 @@ async def create_job(
         phase="totalsegmentator",
         percent=0.0,
         params={
+            "nombre_proceso": (process_name or None),
             "enable_ortopedia": enable_ortopedia,
             "enable_appendicular": enable_appendicular,
             "enable_muscles": enable_muscles,
@@ -518,6 +795,7 @@ async def create_job(
             enable_teeth=bool(teeth),
             enable_hip_implant=bool(enable_hip_implant),
             extra_tasks_json=(json.dumps(extra_list, ensure_ascii=False) if extra_list else None),
+            queue_name=(process_name or None),
         )
         db.add(jc)
         db.commit()
@@ -528,9 +806,6 @@ async def create_job(
             pass
 
     return JSONResponse(content=manifest.to_dict(), status_code=201)
-
-
-from ..core.security import require_admin
 
 
 @router.get("/jobs")
@@ -557,6 +832,14 @@ async def list_jobs(user = Depends(require_admin)):
     return {"jobs": manifests}
 
 
+@router.get("/admin/gpu-check")
+async def admin_gpu_check(user=Depends(require_admin)):
+    """Diagnostico de reconocimiento de GPU para procesamiento 3D.
+    Solo disponible para ADMINISTRADOR.
+    """
+    return _probe_gpu_runtime()
+
+
 @router.get("/jobs/mine")
 async def list_my_jobs(db: Session = Depends(get_db), user = Depends(get_current_user)):
     """Lista solo los jobs creados por el usuario autenticado (JobConv.id_usuario).
@@ -567,11 +850,14 @@ async def list_my_jobs(db: Session = Depends(get_db), user = Depends(get_current
     items: List[Dict[str, Any]] = []
     for jc in entries:
         m = _load_manifest(jc.job_id)
+        status = (m.status if m else jc.status)
         items.append({
             "job_id": jc.job_id,
-            "status": (m.status if m else jc.status),
+            "nombre_proceso": getattr(jc, "queue_name", None),
+            "status": status,
             "phase": (m.phase if m else None),
-            "percent": (m.percent if m else (100.0 if jc.status == "DONE" else 0.0)),
+            "percent": (m.percent if m else (100.0 if status == "DONE" else 0.0)),
+            "metrics": (m.metrics if m else {}),
             "updated_at": getattr(jc, "updated_at", None),
         })
     return {"jobs": items}
@@ -596,9 +882,11 @@ async def list_my_jobs_tracking(db: Session = Depends(get_db), user = Depends(ge
         status = (m.status if m else jc.status)
         items.append({
             "job_id": jc.job_id,
+            "nombre_proceso": getattr(jc, "queue_name", None),
             "status": status,
             "phase": (m.phase if m else None),
             "percent": (m.percent if m else (100.0 if status == "DONE" else 0.0)),
+            "metrics": (m.metrics if m else {}),
             "is_processing": str(status).upper() in ("QUEUED", "RUNNING"),
             "owner": {
                 "id_usuario": u.id_usuario,
@@ -629,9 +917,11 @@ async def list_jobs_tracking(db: Session = Depends(get_db), user=Depends(require
         status = (m.status if m else jc.status)
         items.append({
             "job_id": jc.job_id,
+            "nombre_proceso": getattr(jc, "queue_name", None),
             "status": status,
             "phase": (m.phase if m else None),
             "percent": (m.percent if m else (100.0 if status == "DONE" else 0.0)),
+            "metrics": (m.metrics if m else {}),
             "is_processing": str(status).upper() in ("QUEUED", "RUNNING"),
             "owner": {
                 "id_usuario": u.id_usuario,
@@ -647,7 +937,8 @@ async def list_jobs_tracking(db: Session = Depends(get_db), user=Depends(require
 
 
 @router.get("/jobs/{job_id}")
-async def get_job(job_id: str, user = Depends(get_current_user)):
+async def get_job(job_id: str, db: Session = Depends(get_db), user = Depends(get_current_user)):
+    _ensure_job_access(db, user, job_id)
     m = _load_manifest(job_id)
     if not m:
         raise HTTPException(status_code=404, detail="Job no encontrado")
@@ -655,7 +946,8 @@ async def get_job(job_id: str, user = Depends(get_current_user)):
 
 
 @router.get("/jobs/{job_id}/progress")
-async def get_progress(job_id: str, user = Depends(get_current_user)):
+async def get_progress(job_id: str, db: Session = Depends(get_db), user = Depends(get_current_user)):
+    _ensure_job_access(db, user, job_id)
     m = _load_manifest(job_id)
     if not m:
         raise HTTPException(status_code=404, detail="Job no encontrado")
@@ -663,7 +955,14 @@ async def get_progress(job_id: str, user = Depends(get_current_user)):
 
 
 @router.get("/jobs/{job_id}/log")
-async def get_log(job_id: str, tail: int = 200, full: bool = False, user = Depends(get_current_user)):
+async def get_log(
+    job_id: str,
+    tail: int = 200,
+    full: bool = False,
+    db: Session = Depends(get_db),
+    user = Depends(get_current_user),
+):
+    _ensure_job_access(db, user, job_id)
     # El log principal se guarda como job.log en la raíz del job.
     # Si no existe (jobs antiguos o en progreso), se intenta usar el manifest.log_tail como fallback.
     s3 = _ensure_s3()
@@ -708,7 +1007,7 @@ async def get_log(job_id: str, tail: int = 200, full: bool = False, user = Depen
                 except Exception:
                     lines = []
 
-    if tail and tail > 0:
+    if (not full) and tail and tail > 0:
         try:
             t = int(tail)
             if t > 0:
@@ -737,8 +1036,46 @@ async def get_log(job_id: str, tail: int = 200, full: bool = False, user = Depen
     }
 
 
+@router.get("/jobs/{job_id}/log/raw")
+async def get_log_raw(
+    job_id: str,
+    download: bool = False,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """Devuelve el log completo en texto plano (sin limite de lineas)."""
+    _ensure_job_access(db, user, job_id)
+    s3 = _ensure_s3()
+    log_key = _s3_key(job_id, LOG_KEY)
+    source = "manifest_tail"
+    text_data = ""
+
+    try:
+        data = s3.download_bytes(log_key)
+        text_data = data.decode("utf-8", errors="ignore")
+        source = "job.log"
+    except Exception:
+        try:
+            old_key = _s3_key(job_id, "logs/job.log")
+            data = s3.download_bytes(old_key)
+            text_data = data.decode("utf-8", errors="ignore")
+            source = "logs/job.log"
+        except Exception:
+            m = _load_manifest(job_id)
+            text_data = "\n".join((m.log_tail or [])) if m else ""
+            source = "manifest_tail"
+
+    headers = {
+        "X-Log-Source": source,
+    }
+    if download:
+        headers["Content-Disposition"] = f'attachment; filename="som3d_{job_id}.log"'
+    return Response(content=text_data, media_type="text/plain; charset=utf-8", headers=headers)
+
+
 @router.get("/jobs/{job_id}/stls")
-async def get_stls(job_id: str, user = Depends(get_current_user)):
+async def get_stls(job_id: str, db: Session = Depends(get_db), user = Depends(get_current_user)):
+    _ensure_job_access(db, user, job_id)
     s3 = _ensure_s3()
     base1 = s3.join_key(s3.cfg.prefix or "", job_id)
     base2 = s3.join_key(base1, RESULT_SUBDIR)
@@ -771,7 +1108,13 @@ async def get_stls(job_id: str, user = Depends(get_current_user)):
 
 
 @router.get("/jobs/{job_id}/result")
-async def get_result(job_id: str, expires: int = 3600, user = Depends(get_current_user)):
+async def get_result(
+    job_id: str,
+    expires: int = 3600,
+    db: Session = Depends(get_db),
+    user = Depends(get_current_user),
+):
+    _ensure_job_access(db, user, job_id)
     s3 = _ensure_s3()
     m = _load_manifest(job_id)
     if not m:
@@ -791,10 +1134,13 @@ async def get_result(job_id: str, expires: int = 3600, user = Depends(get_curren
 
 @router.post("/jobs/{job_id}/finalize", response_model=JobSTLOut)
 async def finalize_job(job_id: str, payload: FinalizeJobIn, db: Session = Depends(get_db), user = Depends(get_current_user)):
+    _ensure_job_access(db, user, job_id)
     # Optionally mark JobConv as DONE and create JobSTL linked to a Paciente
     # Validate paciente ownership if medico
     med = db.query(Medico).filter(Medico.id_usuario == user.id_usuario).first()
     if med is not None:
+        if payload.id_paciente is None:
+            raise HTTPException(status_code=400, detail="id_paciente es obligatorio para medico")
         p = db.query(Paciente).filter(Paciente.id_paciente == payload.id_paciente).first()
         if not p or p.id_medico != med.id_medico:
             raise HTTPException(status_code=403, detail="Paciente no pertenece al medico")
@@ -814,11 +1160,60 @@ async def finalize_job(job_id: str, payload: FinalizeJobIn, db: Session = Depend
         id_paciente=payload.id_paciente,
         stl_size=payload.stl_size,
         num_stl_archivos=payload.num_stl_archivos,
+        notas=payload.notas,
     )
     db.add(js)
     db.commit()
     db.refresh(js)
     return js
+
+
+@router.patch("/jobstl/{id_jobstl}/notes", response_model=JobSTLOut)
+async def update_jobstl_notes(
+    id_jobstl: int,
+    payload: JobSTLNoteUpdateIn,
+    db: Session = Depends(get_db),
+    user = Depends(get_current_user),
+):
+    js = _get_jobstl_owned(db, user, id_jobstl)
+    js.notas = payload.notas
+    db.add(js)
+    db.commit()
+    db.refresh(js)
+    return js
+
+
+@router.delete("/jobstl/{id_jobstl}", status_code=204)
+async def delete_jobstl(
+    id_jobstl: int,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    if not (_is_admin(user) or _is_medico(user)):
+        raise HTTPException(status_code=403, detail="No autorizado")
+
+    js = _get_jobstl_owned(db, user, id_jobstl)
+    # Refuerza ownership por creador del job para usuarios no admin.
+    _ensure_job_access(db, user, js.job_id)
+
+    # Eliminar artefactos del job en MinIO/S3 primero.
+    try:
+        _delete_job_artifacts_s3(js.job_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"No se pudo borrar en MinIO/S3: {e}")
+
+    jobstl_ids = [int(r[0]) for r in db.query(JobSTL.id_jobstl).filter(JobSTL.job_id == js.job_id).all()]
+    try:
+        if jobstl_ids:
+            db.query(VisorEstado).filter(VisorEstado.id_jobstl.in_(jobstl_ids)).delete(synchronize_session=False)
+        db.query(JobSTL).filter(JobSTL.job_id == js.job_id).delete(synchronize_session=False)
+        db.query(JobConv).filter(JobConv.job_id == js.job_id).delete(synchronize_session=False)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="No se pudo borrar el registro 3D en base de datos")
+
+    return Response(status_code=204)
 
 
 @router.delete("/jobs/{job_id}")
@@ -923,12 +1318,12 @@ def patients_with_stl(db: Session = Depends(get_db), user=Depends(get_current_us
     - Médico: solo sus pacientes
     Devuelve id_jobstl, job_id, id_paciente y datos básicos del paciente.
     """
-    q = db.query(JobSTL, Paciente).join(Paciente, JobSTL.id_paciente == Paciente.id_paciente)
+    q = db.query(JobSTL, Paciente).outerjoin(Paciente, JobSTL.id_paciente == Paciente.id_paciente)
     if getattr(user, "rol", None) != "ADMINISTRADOR":
         med = db.query(Medico).filter(Medico.id_usuario == user.id_usuario).first()
         if not med:
             return []
-        q = q.filter(Paciente.id_medico == med.id_medico)
+        q = q.filter(JobSTL.id_paciente.isnot(None), Paciente.id_medico == med.id_medico)
     rows = q.order_by(JobSTL.created_at.desc()).all()
     out: list[PatientJobSTLOut] = []
     for js, p in rows:
@@ -939,16 +1334,51 @@ def patients_with_stl(db: Session = Depends(get_db), user=Depends(get_current_us
             nombres=getattr(p, "nombres", None),
             apellidos=getattr(p, "apellidos", None),
             doc_numero=getattr(p, "doc_numero", None),
+            notas=getattr(js, "notas", None),
             created_at=str(getattr(js, "created_at", "")) if getattr(js, "created_at", None) else None,
         ))
     return out
 
 
+@router.get("/jobs/{job_id}/state-context")
+def job_state_context(
+    job_id: str,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """Devuelve contexto minimo para guardar/cargar estado de visor por job.
+
+    Respuesta:
+    - job_id
+    - id_jobstl (ultimo registro de JobSTL para ese job)
+    - id_paciente (si existe vinculacion)
+    """
+    _ensure_job_access(db, user, job_id)
+    js = (
+        db.query(JobSTL)
+        .filter(JobSTL.job_id == job_id)
+        .order_by(JobSTL.created_at.desc(), JobSTL.id_jobstl.desc())
+        .first()
+    )
+    if not js:
+        raise HTTPException(status_code=404, detail="Aun no existe contexto STL para este job")
+    return {
+        "job_id": job_id,
+        "id_jobstl": int(js.id_jobstl),
+        "id_paciente": (int(js.id_paciente) if js.id_paciente is not None else None),
+    }
+
+
 @router.get("/jobs/{job_id}/result/bytes")
-async def download_result_zip_bytes(job_id: str):
+async def download_result_zip_bytes(
+    job_id: str,
+    db: Session = Depends(get_db),
+    user = Depends(get_current_user),
+):
     """Descarga el ZIP de resultados desde S3 y lo devuelve en la misma
     respuesta, para evitar problemas de CORS con URLs presignadas.
     """
+    _ensure_job_access(db, user, job_id)
     s3 = _ensure_s3()
     key = _s3_key(job_id, RESULT_ZIP)
     if not s3.exists(key):

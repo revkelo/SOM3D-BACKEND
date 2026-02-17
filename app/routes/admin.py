@@ -27,6 +27,13 @@ def admin_gpu_check(user=Depends(get_current_user)):
         "gpu_ready": False,
         "gpu_detected": False,
         "backend": "cpu",
+        "post_restart_check": {
+            "title": "Reiniciar backend y verificar",
+            "command": 'python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.device_count())"',
+            "output": "",
+            "ok": False,
+            "error": None,
+        },
         "python": sys.version.split(" ")[0],
         "cuda_visible_devices": os.getenv("CUDA_VISIBLE_DEVICES", ""),
         "nvidia_smi": {"available": False, "error": None, "devices": []},
@@ -102,6 +109,26 @@ def admin_gpu_check(user=Depends(get_current_user)):
     out["gpu_detected"] = bool(out["nvidia_smi"]["devices"]) or bool(out["torch"]["cuda_available"]) or bool(out["cupy"]["cuda_available"])
     out["gpu_ready"] = bool(out["torch"]["cuda_available"]) or bool(out["cupy"]["cuda_available"])
     out["backend"] = "cuda" if out["gpu_ready"] else "cpu"
+
+    try:
+        chk = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.device_count())",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+        cmd_out = (chk.stdout or "").strip()
+        cmd_err = (chk.stderr or "").strip()
+        out["post_restart_check"]["output"] = cmd_out
+        out["post_restart_check"]["ok"] = chk.returncode == 0
+        out["post_restart_check"]["error"] = cmd_err or (None if chk.returncode == 0 else f"return_code={chk.returncode}")
+    except Exception as ex:
+        out["post_restart_check"]["ok"] = False
+        out["post_restart_check"]["error"] = str(ex)
     return out
 
 

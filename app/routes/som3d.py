@@ -1,4 +1,5 @@
 from __future__ import annotations
+from stl import mesh
 
 import io
 import os
@@ -586,14 +587,59 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
                 save_worker_error("convert_to_stl", e)
                 return
 
+
             try:
+                wlog("Calculando métricas de vértices STL ...")
                 hq_dir = stl_out / "hq_suavizado_decimado"
-                target = hq_dir if (hq_dir.exists() and any(hq_dir.rglob('*.stl'))) else stl_out
+                original_dir = stl_out
+
+                # Determinar carpeta final y si existe HQ
+                target = hq_dir if (hq_dir.exists() and any(hq_dir.rglob('*.stl'))) else original_dir
+
+                def count_vertices(stl_path: Path) -> int:
+                    try:
+                        m = mesh.Mesh.from_file(str(stl_path))
+                        # numpy-stl almacena vértices duplicados por triángulo, así que se eliminan
+                        unique_vertices = len(set(map(tuple, m.vectors.reshape(-1, 3).round(5))))
+                        return unique_vertices
+                    except Exception:
+                        return 0
+
+                total_vertices_original = 0
+                total_vertices_hq = 0
+                count_files = 0
+
+                # Contar vértices de modelos originales
+                for f in original_dir.rglob("*.stl"):
+                    v = count_vertices(f)
+                    total_vertices_original += v
+                    count_files += 1
+                    wlog(f"Vertices (original) {f.name}: {v}")
+
+                # Contar vértices de modelos HQ si existen
+                if hq_dir.exists():
+                    for f in hq_dir.rglob("*.stl"):
+                        v = count_vertices(f)
+                        total_vertices_hq += v
+                        wlog(f"Vertices (HQ) {f.name}: {v}")
+
+                wlog(f"Total vértices originales: {total_vertices_original}")
+                if total_vertices_hq > 0:
+                    wlog(f"Total vértices HQ: {total_vertices_hq}")
+                    if total_vertices_original > 0:
+                        reduction = 100 * (1 - total_vertices_hq / total_vertices_original)
+                        wlog(f"Reducción promedio de vértices: {reduction:.2f}%")
+                else:
+                    wlog("No se encontraron modelos HQ; se usan originales como referencia.")
+
+                # Continuar con zipeo y subida
+                write_manifest_patch({"phase": "zipping", "percent": 90.0})
                 t_zip_start = time.time()
                 zip_bytes = _zip_dir_to_bytes(target)
                 s3.upload_bytes(zip_bytes, s3_key(RESULT_ZIP), content_type="application/zip")
                 zip_seconds = time.time() - (t_zip_start or time.time())
                 wlog(f"ZIP subido a S3. Tiempo empaquetado/subida: {_fmt_dur(zip_seconds)}")
+
             except Exception as e:
                 save_worker_error("zip_upload", e)
                 return
@@ -623,7 +669,14 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
                         "convert_seconds": float(conv_seconds or 0.0),
                         "zip_seconds": float(zip_seconds or 0.0),
                         "total_seconds": float(total_seconds or 0.0),
-                    }
+                    },
+                    "vertices": {
+                        "total_original": int(total_vertices_original),
+                        "total_hq": int(total_vertices_hq),
+                        "reduction_percent": float(
+                            100 * (1 - total_vertices_hq / total_vertices_original)
+                        ) if total_vertices_original > 0 and total_vertices_hq > 0 else None,
+                    },
                 },
                 "s3_keys_results": keys,
             })

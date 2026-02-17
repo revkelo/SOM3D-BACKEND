@@ -1340,6 +1340,35 @@ def patients_with_stl(db: Session = Depends(get_db), user=Depends(get_current_us
     return out
 
 
+@router.get("/jobs/{job_id}/state-context")
+def job_state_context(
+    job_id: str,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """Devuelve contexto minimo para guardar/cargar estado de visor por job.
+
+    Respuesta:
+    - job_id
+    - id_jobstl (ultimo registro de JobSTL para ese job)
+    - id_paciente (si existe vinculacion)
+    """
+    _ensure_job_access(db, user, job_id)
+    js = (
+        db.query(JobSTL)
+        .filter(JobSTL.job_id == job_id)
+        .order_by(JobSTL.created_at.desc(), JobSTL.id_jobstl.desc())
+        .first()
+    )
+    if not js:
+        raise HTTPException(status_code=404, detail="Aun no existe contexto STL para este job")
+    return {
+        "job_id": job_id,
+        "id_jobstl": int(js.id_jobstl),
+        "id_paciente": (int(js.id_paciente) if js.id_paciente is not None else None),
+    }
+
+
 @router.get("/jobs/{job_id}/result/bytes")
 async def download_result_zip_bytes(
     job_id: str,

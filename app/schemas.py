@@ -929,7 +929,7 @@ class JobSTLNoteUpdateIn(BaseModel):
 # VisorEstado
 # --------------------
 class VisorEstadoIn(BaseModel):
-    id_paciente: int
+    id_paciente: Optional[int] = None
     id_jobstl: Optional[int] = None
     titulo: str = Field(min_length=1, max_length=200)
     descripcion: Optional[str] = Field(default=None, max_length=400)
@@ -955,7 +955,7 @@ class VisorEstadoIn(BaseModel):
 class VisorEstadoOut(BaseModel):
     id_visor_estado: int
     id_medico: int
-    id_paciente: int
+    id_paciente: Optional[int]
     id_jobstl: Optional[int]
     titulo: str
     descripcion: Optional[str]

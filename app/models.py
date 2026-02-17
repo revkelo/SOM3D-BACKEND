@@ -148,7 +148,7 @@ class VisorEstado(Base):
     __tablename__ = "VisorEstado"
     id_visor_estado: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     id_medico: Mapped[int] = mapped_column(ForeignKey("Medico.id_medico"), nullable=False)
-    id_paciente: Mapped[int] = mapped_column(ForeignKey("Paciente.id_paciente"), nullable=False)
+    id_paciente: Mapped[int | None] = mapped_column(ForeignKey("Paciente.id_paciente"), nullable=True)
     id_jobstl: Mapped[int | None] = mapped_column(ForeignKey("JobSTL.id_jobstl"))
     titulo: Mapped[str] = mapped_column(String(200), nullable=False)
     descripcion: Mapped[str | None] = mapped_column(String(400))

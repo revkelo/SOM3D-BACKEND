@@ -255,7 +255,7 @@ class AuthRefreshSession(Base):
     __tablename__ = "auth_refresh_session"
 
     id_session: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    id_usuario: Mapped[int] = mapped_column(ForeignKey("Usuario.id_usuario"), nullable=False)
+    id_usuario: Mapped[int] = mapped_column(Integer, nullable=False)
     jti: Mapped[str] = mapped_column(String(96), unique=True, nullable=False)
     fp: Mapped[str | None] = mapped_column(String(32), nullable=True)
     ip_address: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -288,8 +288,8 @@ class ClinicalNote(Base):
     __tablename__ = "clinical_note"
 
     id_note: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    id_paciente: Mapped[int] = mapped_column(ForeignKey("Paciente.id_paciente"), nullable=False)
-    id_medico: Mapped[int] = mapped_column(ForeignKey("Medico.id_medico"), nullable=False)
+    id_paciente: Mapped[int] = mapped_column(Integer, nullable=False)
+    id_medico: Mapped[int] = mapped_column(Integer, nullable=False)
     segmento: Mapped[str] = mapped_column(String(60), nullable=False, server_default="GENERAL")
     texto: Mapped[str] = mapped_column(Text, nullable=False)
     anchor_json: Mapped[str | None] = mapped_column(Text, nullable=True)

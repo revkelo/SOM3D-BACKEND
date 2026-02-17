@@ -7,6 +7,7 @@ ARG CUPY_VER=13.0.0
 # Stage GPU (default runtime)
 ############################
 FROM pytorch/pytorch:${TORCH_VER}-cuda12.1-cudnn8-runtime AS final
+ARG CUPY_VER
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 libglib2.0-0 libxrender1 libsm6 libxext6 libglvnd0 \

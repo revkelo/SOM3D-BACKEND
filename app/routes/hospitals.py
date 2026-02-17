@@ -248,6 +248,12 @@ def link_hospital_by_code(payload: HospitalLinkByCodeIn, db: Session = Depends(g
         .first()
         is not None
     )
+
+    # Si el hospital tiene suscripcion activa, activar acceso del medico vinculado.
+    if has_active:
+        m.estado = "ACTIVO"
+        user.activo = True
+
     db.commit()
     return {
         "ok": True,

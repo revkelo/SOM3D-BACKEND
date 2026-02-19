@@ -6,18 +6,31 @@ import os, sys, time, shutil
 from pathlib import Path
 import numpy as np
 
-# ---- Opcional: activar modo "solo GPU" si hay CuPy ----
+# ---- CuPy (lazy import): evitar problemas con CUDA + fork (multiprocessing) ----
 _HAS_CUPY = False
 _cupy_ver = "unknown"
-GPU_ONLY_OTSU = False
-try:
-    os.environ.setdefault("CUPY_DONT_WARN_ON_CUDA_PATH", "1")
-    import cupy as cp
-    _HAS_CUPY = True
-    GPU_ONLY_OTSU = True
-    _cupy_ver = getattr(cp, "__version__", "unknown")
-except Exception:
-    pass
+_CUPY = None
+_CUPY_TRIED = False
+
+GPU_ONLY_OTSU = str(os.getenv("SOM3D_GPU_ONLY_OTSU", "false")).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def _get_cupy():
+    global _HAS_CUPY, _cupy_ver, _CUPY, _CUPY_TRIED
+    if _CUPY_TRIED:
+        return _CUPY
+    _CUPY_TRIED = True
+    try:
+        os.environ.setdefault("CUPY_DONT_WARN_ON_CUDA_PATH", "1")
+        import cupy as cp  # type: ignore
+        _CUPY = cp
+        _HAS_CUPY = True
+        _cupy_ver = getattr(cp, "__version__", "unknown")
+    except Exception:
+        _CUPY = None
+        _HAS_CUPY = False
+        _cupy_ver = "unavailable"
+    return _CUPY
 
 import nibabel as nib
 from skimage.filters import threshold_otsu, gaussian
@@ -76,6 +89,9 @@ def _compute_otsu_cpu(vec_np: np.ndarray) -> float:
     return float(threshold_otsu(vec_np))
 
 def _compute_otsu_gpu_cupy(vec_cp: "cp.ndarray", bins: int = 4096) -> float:
+    cp = _get_cupy()
+    if cp is None:
+        raise RuntimeError("GPU Otsu requiere CuPy.")
     vec_cp = vec_cp.astype(cp.float32, copy=False)
     vmin, vmax = cp.min(vec_cp), cp.max(vec_cp)
     if not cp.isfinite(vmin) or not cp.isfinite(vmax) or vmin == vmax:
@@ -107,7 +123,9 @@ def mask_from_otsu_cpu(vol: np.ndarray, clip_min: float|None, clip_max: float|No
     return (data >= t), float(t)
 
 def mask_from_otsu_gpu_only(vol_np: np.ndarray, clip_min: float|None, clip_max: float|None, exclude_zeros: bool) -> tuple[np.ndarray, float]:
-    if not _HAS_CUPY: raise RuntimeError("GPU Otsu requiere CuPy.")
+    cp = _get_cupy()
+    if cp is None:
+        raise RuntimeError("GPU Otsu requiere CuPy.")
     data = cp.asarray(vol_np, dtype=cp.float32)
     if clip_min is not None or clip_max is not None:
         lo = -cp.inf if clip_min is None else clip_min
@@ -398,6 +416,9 @@ class NiftiToSTLConverter:
         files = find_nii_files(input_dir, recursive)
         total, successes = len(files), 0
         results: list[dict] = []
+
+        # Intenta cargar CuPy en el proceso actual (worker) antes de iniciar.
+        _get_cupy()
 
         originals_dir = output_dir / "originales"
         hq_dir = output_dir / "hq_suavizado_decimado"

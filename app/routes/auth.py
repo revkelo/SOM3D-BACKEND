@@ -744,7 +744,9 @@ def _clear_refresh_cookie(response: Response):
 def issue_csrf(response: Response):
     value = _csrf_value()
     _set_csrf_cookie(response, value)
-    return {"ok": True}
+    # Devolvemos el valor para clientes que no pueden leer cookies
+    # (p.ej. navegadores con restricciones de storage/cookies).
+    return {"ok": True, "csrf": value}
 
 
 @router.post("/refresh", response_model=TokenOut)

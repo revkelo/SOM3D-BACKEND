@@ -11,7 +11,7 @@ import tempfile
 import time
 import uuid
 from dataclasses import dataclass, asdict
-from multiprocessing import Process
+import multiprocessing as mp
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -830,7 +830,7 @@ async def create_job(
     except Exception:
         db_url = None
     # Pasar al worker la ruta local del ZIP para evitar subir input.zip a S3
-    proc = Process(target=_worker_entry, args=(job_id, s3_cfg, manifest.params, db_url, str(local_tmp)), daemon=True)
+    proc = mp.Process(target=_worker_entry, args=(job_id, s3_cfg, manifest.params, db_url, str(local_tmp)), daemon=True)
     proc.start()
     _append_log(job_id, f"PID worker: {proc.pid}")
 

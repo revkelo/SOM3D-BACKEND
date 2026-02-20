@@ -1,4 +1,4 @@
-﻿import json
+import json
 from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -80,10 +80,8 @@ def list_patients(
 ):
     q = db.query(Paciente)
     if getattr(user, "rol", None) != "ADMINISTRADOR":
-        # Medico: limitar a sus pacientes
         med = db.query(Medico).filter(Medico.id_usuario == user.id_usuario).first()
         if not med:
-            # auto-crear perfil Medico si no existe, para facilitar onboarding
             med = Medico(id_usuario=user.id_usuario)
             db.add(med)
             db.commit()

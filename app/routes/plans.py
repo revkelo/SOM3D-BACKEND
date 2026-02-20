@@ -34,7 +34,6 @@ def get_plan(plan_id: int, db: Session = Depends(get_db)):
 @router.post("/plans", response_model=PlanOut, status_code=201)
 def create_plan(payload: PlanIn, db: Session = Depends(get_db), user=Depends(get_current_user)):
     _ensure_admin(user)
-    # unicidad por nombre
     if db.query(Plan).filter(Plan.nombre == payload.nombre).first():
         raise HTTPException(status_code=409, detail="Nombre de plan ya existe")
     _validate_periodo_duracion(payload.periodo, payload.duracion_meses)
@@ -56,11 +55,9 @@ def update_plan(plan_id: int, payload: PlanUpdateIn, db: Session = Depends(get_d
     plan = db.query(Plan).filter(Plan.id_plan == plan_id).first()
     if not plan:
         raise HTTPException(status_code=404, detail="Plan no encontrado")
-    # unicidad de nombre si cambia
     if payload.nombre is not None and payload.nombre != plan.nombre:
         if db.query(Plan).filter(Plan.nombre == payload.nombre).first():
             raise HTTPException(status_code=409, detail="Nombre de plan ya existe")
-    # validar periodo/duracion coherentes con mezcla de actuales y nuevos
     new_periodo = payload.periodo if payload.periodo is not None else plan.periodo
     new_duracion = payload.duracion_meses if payload.duracion_meses is not None else plan.duracion_meses
     _validate_periodo_duracion(new_periodo, new_duracion)
@@ -80,7 +77,6 @@ def delete_plan(plan_id: int, db: Session = Depends(get_db), user=Depends(get_cu
     if not plan:
         raise HTTPException(status_code=404, detail="Plan no encontrado")
 
-    # Eliminar pagos y suscripciones de este plan para cumplir FKs
     sus_ids = [row[0] for row in db.query(Suscripcion.id_suscripcion).filter(Suscripcion.id_plan == plan_id).all()]
     if sus_ids:
         db.query(Pago).filter(Pago.id_suscripcion.in_(sus_ids)).delete(synchronize_session=False)

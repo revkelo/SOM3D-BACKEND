@@ -20,3 +20,9 @@ venv/
 dist/
 build/
 
+# Runtime data (DICOM/Zips/results)
+data/
+
+# Logs
+*.log
+

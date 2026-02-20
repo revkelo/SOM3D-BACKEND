@@ -1,4 +1,4 @@
-﻿from fastapi import APIRouter, Depends, HTTPException, Query, Response, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, Request
 import secrets
 import hashlib
 import hmac
@@ -337,7 +337,6 @@ def login(payload: LoginIn, response: Response, request: Request, db: Session = 
             reason="INVALID_CREDENTIALS",
         )
         raise HTTPException(status_code=401, detail="Credenciales inválidas")
-    # Permitimos login aunque esté inactivo para completar el pago
 
     _register_login_attempt(
         db,
@@ -356,16 +355,13 @@ def login(payload: LoginIn, response: Response, request: Request, db: Session = 
         jti=refresh_jti,
     )
     _create_refresh_session(db, user=user, request=request, jti=refresh_jti)
-    # Eliminar posibles cookies antiguas con path mÃ¡s especÃ­fico para evitar colisiones
     try:
         response.delete_cookie(REFRESH_COOKIE_NAME, path="/auth")
     except Exception:
         pass
-    # usar helper que fija Path=/ para que el navegador la envÃ­e en todas las rutas
     try:
         _set_refresh_cookie(response, refresh)
     except NameError:
-        # fallback (por si el helper cambia de nombre)
         response.set_cookie(
             key=REFRESH_COOKIE_NAME,
             value=refresh,
@@ -420,9 +416,6 @@ def email_exists(correo: EmailStr, db: Session = Depends(get_db)):
     return {"exists": False}
 
 
-# -----------------------
-# Password reset
-# -----------------------
 
 @router.post("/forgot-password")
 def forgot_password(payload: ForgotPasswordIn, request: Request, db: Session = Depends(get_db)):
@@ -455,7 +448,6 @@ def forgot_password(payload: ForgotPasswordIn, request: Request, db: Session = D
             send_email(user.correo, "Restablecer contrasena - 3DVinci Health", html)
         except Exception:
             pass
-    # Siempre OK para no filtrar existencia
     return {"ok": True}
 
 
@@ -473,7 +465,6 @@ def reset_password(payload: ResetPasswordIn, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
-# --- Alternativa: cÃ³digo de 6 dÃ­gitos para restablecer ---
 @router.post("/forgot-password/code")
 def forgot_password_code(payload: ForgotPasswordIn, request: Request, db: Session = Depends(get_db)):
     limited, retry_after = _action_rate_limited(
@@ -495,21 +486,18 @@ def forgot_password_code(payload: ForgotPasswordIn, request: Request, db: Sessio
         reason="FORGOT_PASSWORD_CODE_REQUEST",
     )
     user = db.query(Usuario).filter(Usuario.correo == payload.correo).first()
-    # Respuesta neutral: siempre se devuelve un token de flujo para evitar enumeraciÃ³n.
     fake_sub = 0
     fake_fp = _fp_password(secrets.token_urlsafe(24))
     fake_code = str(secrets.randbelow(1_000_000)).zfill(6)
     flow_data = {"sub": fake_sub, "fp": fake_fp, "ch": _reset_code_digest(fake_code)}
     if user:
         try:
-            # Generar cÃ³digo 6 dÃ­gitos + token con fingerprint
             code = str(secrets.randbelow(1_000_000)).zfill(6)
             flow_data = {
                 "sub": user.id_usuario,
                 "fp": _fp_password(user.contrasena),
                 "ch": _reset_code_digest(code),
             }
-            # Enviar correo con el cÃ³digo
             html = template_reset_code(user.nombre or "Usuario", code, RESET_PASS_EXPIRE_MIN)
             send_email(user.correo, "Codigo de restablecimiento - 3DVinci Health", html)
         except Exception:
@@ -536,7 +524,6 @@ def reset_password_code(payload: ResetPasswordCodeIn, request: Request, db: Sess
             reason="RESET_CODE_INVALID",
         )
         raise HTTPException(status_code=400, detail="Token invalido o expirado")
-    # Validar cÃ³digo (v2: digest firmado; v1: compatibilidad temporal con tokens antiguos)
     provided_code = (payload.code or "").strip()
     expected_digest = str(data.get("ch") or "").strip()
     if expected_digest:
@@ -553,7 +540,6 @@ def reset_password_code(payload: ResetPasswordCodeIn, request: Request, db: Sess
             reason="RESET_CODE_INVALID",
         )
         raise HTTPException(status_code=400, detail="Codigo invalido o expirado")
-    # Validar fingerprint y actualizar contraseÃ±a
     user = db.query(Usuario).filter(Usuario.id_usuario == int(data.get("sub", 0))).first()
     if not user:
         _register_login_attempt(
@@ -564,7 +550,6 @@ def reset_password_code(payload: ResetPasswordCodeIn, request: Request, db: Sess
             reason="RESET_CODE_INVALID",
         )
         raise HTTPException(status_code=400, detail="Token invalido o expirado")
-    # fp guardado en token al generar
     saved_fp = data.get("fp")
     from ..core.tokens import token_fp_matches as _tfm
     if not _tfm({"fp": saved_fp}, user.contrasena):
@@ -607,7 +592,6 @@ def pre_register(payload: RegisterIn, request: Request, db: Session = Depends(ge
         raise HTTPException(status_code=409, detail="Correo ya registrado")
 
     hashed = hash_password(payload.password)
-    # Generate 6-digit verification code
     import secrets
     code = str(secrets.randbelow(1_000_000)).zfill(6)
 
@@ -619,17 +603,14 @@ def pre_register(payload: RegisterIn, request: Request, db: Session = Depends(ge
         "telefono": payload.telefono,
         "direccion": payload.direccion,
         "ciudad": payload.ciudad,
-        # Seguridad: el preregistro pÃºblico nunca eleva privilegios.
         "rol": "MEDICO",
         "ch": _reset_code_digest(code),
     }
     token = make_pre_register_token(data, VERIFY_EMAIL_EXPIRE_MIN)
-    # Send email with verification code (no link)
     html = template_verify_code(payload.nombre or "Usuario", code, VERIFY_EMAIL_EXPIRE_MIN)
     res = send_email(str(payload.correo), "Verifica tu correo - 3DVinci Health", html)
     if not res.get("ok"):
         raise HTTPException(status_code=502, detail=f"Fallo enviando correo: {res}")
-    # Return token to be used with code on frontend
     return {"ok": True, "token": token, "expires_in": VERIFY_EMAIL_EXPIRE_MIN}
 
 
@@ -638,7 +619,6 @@ def confirm_register_code(payload: ConfirmCodeIn, db: Session = Depends(get_db))
     data = parse_pre_register_token(payload.token)
     if not data:
         raise HTTPException(status_code=400, detail="Token invalido o expirado")
-    # Check 6-digit code (v2: digest firmado; v1: compatibilidad temporal con tokens antiguos)
     provided_code = (payload.code or "").strip()
     expected_digest = str(data.get("ch") or "").strip()
     if expected_digest:
@@ -647,10 +627,8 @@ def confirm_register_code(payload: ConfirmCodeIn, db: Session = Depends(get_db))
         code_ok = provided_code == (str(data.get("code") or "").strip())
     if not code_ok:
         raise HTTPException(status_code=400, detail="Codigo invalido o expirado")
-    # Avoid duplicates
     if db.query(Usuario).filter(Usuario.correo == data.get("correo")).first():
         raise HTTPException(status_code=409, detail="Correo ya registrado")
-    # Create user
     user = Usuario(
         nombre=data.get("nombre"),
         apellido=data.get("apellido"),
@@ -712,9 +690,6 @@ def reset_password_form(token: str = Query(...)):
     return HTMLResponse(html)
 
 
-# -----------------------
-# Refresh & Logout (cookies HttpOnly)
-# -----------------------
 
 def _set_refresh_cookie(response: Response, token: str):
     same = (REFRESH_COOKIE_SAMESITE or "lax").lower()
@@ -722,7 +697,6 @@ def _set_refresh_cookie(response: Response, token: str):
         same = "lax"
     secure = bool(REFRESH_COOKIE_SECURE)
     if same == "none" and not secure:
-        # Navegadores rechazan SameSite=None sin Secure.
         secure = True
     response.set_cookie(
         key=REFRESH_COOKIE_NAME,
@@ -731,7 +705,6 @@ def _set_refresh_cookie(response: Response, token: str):
         secure=secure,
         samesite=same,
         max_age=REFRESH_TOKEN_EXPIRE_MINUTES * 60,
-        # Usar path raiz para que el navegador la envÃ­e en cualquier ruta
         path="/",
     )
 
@@ -744,8 +717,6 @@ def _clear_refresh_cookie(response: Response):
 def issue_csrf(response: Response):
     value = _csrf_value()
     _set_csrf_cookie(response, value)
-    # Devolvemos el valor para clientes que no pueden leer cookies
-    # (p.ej. navegadores con restricciones de storage/cookies).
     return {"ok": True, "csrf": value}
 
 
@@ -823,8 +794,6 @@ def refresh_token(request: Request, response: Response, db: Session = Depends(ge
 
 @router.post("/logout")
 def logout(request: Request, response: Response, db: Session = Depends(get_db)):
-    # Logout debe ser idempotente: si el CSRF ya no existe (p. ej. tras refresh 401),
-    # aun asi limpiamos cookies locales para cerrar sesion del cliente.
     try:
         _validate_csrf(request)
     except HTTPException:

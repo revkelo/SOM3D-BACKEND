@@ -62,7 +62,6 @@ def token_fp_matches(token_payload: dict, current_hashed_password: str) -> bool:
         return False
 
 
-# Tokens para flujo de restablecimiento con código de 6 dígitos
 def make_reset_code_token(data: dict, expires_minutes: int) -> str:
     payload = {
         "k": "reset_code",
@@ -83,9 +82,6 @@ def parse_reset_code_token(token: str) -> dict | None:
         return None
 
 
-# -----------------------
-# Refresh tokens
-# -----------------------
 
 def make_refresh_token(
     user_id: int,
@@ -98,7 +94,6 @@ def make_refresh_token(
         "k": "refresh",
         "sub": str(user_id),
         "jti": str(jti or ""),
-        # Fingerprint del password para invalidar refresh si cambia la contraseña
         "fp": _fp_password(hashed_password),
         "iat": int(_now().timestamp()),
         "exp": int((_now() + timedelta(minutes=exp_min)).timestamp()),

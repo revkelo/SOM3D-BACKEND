@@ -262,7 +262,6 @@ def admin_metrics(db: Session = Depends(get_db), user=Depends(get_current_user))
             "payments_month_count": payments_count_month,
             "revenue_month": revenue_month,
         },
-        # Compatibilidad con frontend anterior
         "hospitals": {
             "total": total_hospitals,
             "activos": active_hospitals,

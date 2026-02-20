@@ -21,8 +21,6 @@ def get_db():
 
 
 def ensure_runtime_tables():
-    # Crea todas las tablas si faltan (no migra/altera tablas existentes).
-    # Importar modelos para registrar tablas en el metadata.
     from .. import models as _models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
@@ -36,7 +34,6 @@ def _truthy(v: str | None) -> bool:
 
 
 def _seed_minimal() -> None:
-    # Seed idempotente: crea admin + planes base y (opcional) datos de prueba.
     from ..core.security import hash_password
     from ..models import Usuario, Plan, Medico, Paciente, Suscripcion, Pago
 
@@ -52,7 +49,6 @@ def _seed_minimal() -> None:
 
     db = SessionLocal()
     try:
-        # Admin
         existing_admin = db.execute(
             select(Usuario).where(func.lower(Usuario.correo) == admin_email.lower())
         ).scalar_one_or_none()
@@ -69,14 +65,12 @@ def _seed_minimal() -> None:
             )
             db.commit()
 
-        # Planes base
         for nombre, precio, periodo, dur_meses in plan_seed:
             exists = db.execute(select(Plan).where(Plan.nombre == nombre)).scalar_one_or_none()
             if not exists:
                 db.add(Plan(nombre=nombre, precio=precio, periodo=periodo, duracion_meses=dur_meses))
         db.commit()
 
-        # Datos de prueba (medico + pacientes + suscripcion + pago)
         if _truthy(os.getenv("DB_AUTO_SEED_TEST", "false")):
             _seed_test_data(db)
             db.commit()
@@ -116,7 +110,6 @@ def _seed_test_data(db) -> None:
         db.add(medico)
         db.flush()
 
-    # Pacientes (crea hasta 120 si faltan)
     existing_count = db.execute(select(func.count()).select_from(Paciente).where(Paciente.id_medico == medico.id_medico)).scalar_one()
     target = int(os.getenv("SEED_TEST_PACIENTES", "120"))
     to_create = max(0, target - int(existing_count or 0))
@@ -142,7 +135,6 @@ def _seed_test_data(db) -> None:
                 )
             )
 
-    # Suscripcion ACTIVA para el medico (si no hay)
     existing_active = db.execute(
         select(Suscripcion)
         .where(Suscripcion.id_medico == medico.id_medico, Suscripcion.estado == "ACTIVA")

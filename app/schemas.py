@@ -55,7 +55,6 @@ class RegisterIn(BaseModel):
     telefono: Optional[str] = None
     direccion: Optional[str] = None
     ciudad: Optional[str] = None
-    # El registro público solo permite cuentas MEDICO.
     rol: Literal["MEDICO"] = "MEDICO"
 
     @field_validator("nombre", "apellido", mode="before")
@@ -102,7 +101,6 @@ class LoginIn(BaseModel):
     @classmethod
     def _validate_login_email(cls, v):
         s = _norm_spaces(str(v or "")).lower()
-        # Login permite dominios internos/reservados (p. ej. *.local) para compatibilidad con seeds.
         if not re.fullmatch(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", s):
             raise ValueError("correo invalido")
         return s
@@ -184,9 +182,6 @@ class CheckoutOut(BaseModel):
     onpage_html: str
 
 
-# --------------------
-# Hospital
-# --------------------
 class HospitalIn(BaseModel):
     nombre: str = Field(min_length=1, max_length=150)
     direccion: Optional[str] = Field(default=None, max_length=255)
@@ -194,7 +189,6 @@ class HospitalIn(BaseModel):
     telefono: Optional[str] = Field(default=None, max_length=30)
     correo: Optional[EmailStr] = None
     codigo: Optional[str] = Field(default=None, min_length=1, max_length=12)
-    # Opcional: al crear el hospital, asociarlo a un plan creando una Suscripcion en PAUSADA
     plan_id: Optional[int] = None
 
     @field_validator("nombre", mode="before")
@@ -342,9 +336,6 @@ class HospitalStartSubscriptionIn(BaseModel):
         return s
 
 
-# --------------------
-# Plan
-# --------------------
 class PlanIn(BaseModel):
     nombre: str = Field(min_length=1, max_length=80)
     precio: float = Field(gt=0)
@@ -387,9 +378,6 @@ class PlanOut(BaseModel):
         from_attributes = True
 
 
-# --------------------
-# Suscripcion / Pago (admin)
-# --------------------
 class SubscriptionOut(BaseModel):
     id_suscripcion: int
     id_medico: Optional[int]
@@ -434,9 +422,6 @@ class PaymentOut(BaseModel):
         from_attributes = True
 
 
-# --------------------
-# Auth aux schemas
-# --------------------
 class VerifyEmailRequestIn(BaseModel):
     correo: EmailStr
 
@@ -459,9 +444,6 @@ class ResetPasswordCodeIn(BaseModel):
     new_password: str = Field(min_length=8, max_length=128)
 
 
-# --------------------
-# Paciente
-# --------------------
 class PacienteIn(BaseModel):
     doc_tipo: Optional[str] = Field(default=None, max_length=20)
     doc_numero: Optional[str] = Field(default=None, max_length=40)
@@ -641,9 +623,6 @@ class PacienteOut(BaseModel):
         from_attributes = True
 
 
-# --------------------
-# Estudio
-# --------------------
 class EstudioIn(BaseModel):
     id_paciente: int
     modalidad: Optional[str] = Field(default=None, max_length=20)
@@ -696,9 +675,6 @@ class ClinicalNoteOut(BaseModel):
         from_attributes = True
 
 
-# --------------------
-# Jobs (DB) + finalize
-# --------------------
 class JobConvOut(BaseModel):
     job_id: str
     id_usuario: int
@@ -737,9 +713,6 @@ class JobSTLOut(BaseModel):
         from_attributes = True
 
 
-# --------------------
-# Doctor
-# --------------------
 class DoctorIn(BaseModel):
     nombre: str = Field(min_length=1, max_length=100)
     apellido: str = Field(min_length=1, max_length=100)
@@ -907,9 +880,6 @@ class AdminCreateIn(BaseModel):
         return s
 
 
-# --------------------
-# Som3D: Pacientes con STL
-# --------------------
 class PatientJobSTLOut(BaseModel):
     id_jobstl: int
     job_id: str
@@ -925,9 +895,6 @@ class JobSTLNoteUpdateIn(BaseModel):
 
 
 
-# --------------------
-# VisorEstado
-# --------------------
 class VisorEstadoIn(BaseModel):
     id_paciente: Optional[int] = None
     id_jobstl: Optional[int] = None
@@ -967,9 +934,6 @@ class VisorEstadoOut(BaseModel):
     class Config:
         from_attributes = True
 
-# --------------------
-# Mensajes
-# --------------------
 class MensajeBase(BaseModel):
     id_medico: int
     id_paciente: Optional[int] = None
@@ -987,7 +951,7 @@ class MensajeOut(MensajeBase):
     id_mensaje: int
     creado_en: Optional[datetime] = None
     actualizado_en: Optional[datetime] = None
-    model_config = ConfigDict(from_attributes=True)  # <- correcto en v2
+    model_config = ConfigDict(from_attributes=True)                     
 
 class MensajeList(BaseModel):
     total: int

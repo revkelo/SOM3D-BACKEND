@@ -164,28 +164,23 @@ class Mensaje(Base):
 
     id_mensaje: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
-    # relaciones
     id_medico: Mapped[int] = mapped_column(Integer, ForeignKey("Medico.id_medico"), nullable=False)
     medico = relationship("Medico", backref="mensajes")
 
-    # opcional: si quieres enlazar a paciente (el front lo manda como opcional)
     id_paciente: Mapped[int | None] = mapped_column(Integer, ForeignKey("Paciente.id_paciente"), nullable=True)
     paciente = relationship("Paciente", backref="mensajes", foreign_keys=[id_paciente])
 
-    # datos del mensaje
-    tipo: Mapped[str] = mapped_column(String(30), nullable=False)         # 'error' | 'sugerencia'
+    tipo: Mapped[str] = mapped_column(String(30), nullable=False)                                 
     titulo: Mapped[str] = mapped_column(String(200), nullable=False)
     descripcion: Mapped[str] = mapped_column(Text, nullable=False)
-    severidad: Mapped[str] = mapped_column(String(20), nullable=False)     # 'baja' | 'media' | 'alta'
+    severidad: Mapped[str] = mapped_column(String(20), nullable=False)                                
     adjunto_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
-    # workflow
     estado: Mapped[str] = mapped_column(String(30), nullable=False, default="nuevo")
     respuesta_admin: Mapped[str | None] = mapped_column(Text, nullable=True)
     leido_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     leido_medico: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
-    # tiempos
     creado_en: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     actualizado_en: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
@@ -209,9 +204,9 @@ class ClinicalAudit(Base):
     __tablename__ = "ClinicalAudit"
 
     id_audit: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    entity_type: Mapped[str] = mapped_column(String(32), nullable=False)  # PACIENTE | ESTUDIO
+    entity_type: Mapped[str] = mapped_column(String(32), nullable=False)                      
     entity_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    action: Mapped[str] = mapped_column(String(20), nullable=False)  # CREATE | UPDATE | DELETE
+    action: Mapped[str] = mapped_column(String(20), nullable=False)                            
     actor_id_usuario: Mapped[int | None] = mapped_column(ForeignKey("Usuario.id_usuario"), nullable=True)
     before_json: Mapped[str | None] = mapped_column(Text)
     after_json: Mapped[str | None] = mapped_column(Text)

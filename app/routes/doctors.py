@@ -146,12 +146,10 @@ def update_doctor(
     if "password" in data and data["password"]:
         u.contrasena = hash_password(data["password"])
 
-    # Usuario fields
     for field in ("nombre", "apellido", "telefono", "direccion", "ciudad", "activo"):
         if field in data and data[field] is not None:
             setattr(u, field, data[field])
 
-    # Medico fields
     if "id_hospital" in data:
         if data["id_hospital"] is not None:
             hosp = db.query(Hospital).filter(Hospital.id_hospital == data["id_hospital"]).first()
@@ -178,41 +176,31 @@ def delete_doctor(id_medico: int, db: Session = Depends(get_db), user=Depends(ge
     if not m:
         raise HTTPException(status_code=404, detail="Medico no encontrado")
 
-    # Cascade delete dependencias del médico
     uid = m.id_usuario
 
-    # Pacientes del médico
     p_ids = [row[0] for row in db.query(Paciente.id_paciente).filter(Paciente.id_medico == id_medico).all()]
 
     if p_ids:
         db.query(Mensaje).filter((Mensaje.id_medico == id_medico) | (Mensaje.id_paciente.in_(p_ids))).delete(synchronize_session=False)
-        # VisorEstado primero (depende de Paciente y JobSTL)
         db.query(VisorEstado).filter((VisorEstado.id_medico == id_medico) | (VisorEstado.id_paciente.in_(p_ids))).delete(synchronize_session=False)
-        # Estudio por paciente o por médico
         db.query(Estudio).filter((Estudio.id_medico == id_medico) | (Estudio.id_paciente.in_(p_ids))).delete(synchronize_session=False)
-        # JobSTL por pacientes
         db.query(JobSTL).filter(JobSTL.id_paciente.in_(p_ids)).delete(synchronize_session=False)
-        # Pacientes
         db.query(Paciente).filter(Paciente.id_paciente.in_(p_ids)).delete(synchronize_session=False)
     else:
         db.query(Mensaje).filter(Mensaje.id_medico == id_medico).delete(synchronize_session=False)
-        # Aún así limpiar VisorEstado y Estudio por médico
         db.query(VisorEstado).filter(VisorEstado.id_medico == id_medico).delete(synchronize_session=False)
         db.query(Estudio).filter(Estudio.id_medico == id_medico).delete(synchronize_session=False)
 
-    # Suscripciones y pagos del médico
     sus_ids = [row[0] for row in db.query(Suscripcion.id_suscripcion).filter(Suscripcion.id_medico == id_medico).all()]
     if sus_ids:
         db.query(Pago).filter(Pago.id_suscripcion.in_(sus_ids)).delete(synchronize_session=False)
         db.query(Suscripcion).filter(Suscripcion.id_suscripcion.in_(sus_ids)).delete(synchronize_session=False)
 
-    # Jobs del usuario (si existen)
     job_ids = [row[0] for row in db.query(JobConv.job_id).filter(JobConv.id_usuario == uid).all()]
     if job_ids:
         db.query(JobSTL).filter(JobSTL.job_id.in_(job_ids)).delete(synchronize_session=False)
         db.query(JobConv).filter(JobConv.job_id.in_(job_ids)).delete(synchronize_session=False)
 
-    # Borrar médico y su usuario
     db.query(Medico).filter(Medico.id_medico == id_medico).delete(synchronize_session=False)
     db.query(Usuario).filter(Usuario.id_usuario == uid).delete(synchronize_session=False)
     db.commit()

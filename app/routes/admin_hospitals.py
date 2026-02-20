@@ -1,4 +1,4 @@
-﻿from datetime import datetime, timedelta
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -127,7 +127,6 @@ def admin_create_hospital(payload: HospitalIn, db: Session = Depends(get_db), us
     db.commit()
     db.refresh(hosp)
 
-    # Si enviaron plan_id, crear Suscripcion en PAUSADA para el hospital
     if getattr(payload, "plan_id", None):
         plan = db.query(Plan).filter(Plan.id_plan == int(payload.plan_id)).first()
         if plan:
@@ -250,16 +249,12 @@ def admin_delete_hospital(hospital_id: int, db: Session = Depends(get_db), user=
     if not hosp:
         raise HTTPException(status_code=404, detail="Hospital no encontrado")
 
-    # Recolectar suscripciones asociadas al hospital
     sus_ids = [row[0] for row in db.query(Suscripcion.id_suscripcion).filter(Suscripcion.id_hospital == hospital_id).all()]
 
     if sus_ids:
-        # Borrar pagos de esas suscripciones
         db.query(Pago).filter(Pago.id_suscripcion.in_(sus_ids)).delete(synchronize_session=False)
-        # Borrar suscripciones del hospital
         db.query(Suscripcion).filter(Suscripcion.id_suscripcion.in_(sus_ids)).delete(synchronize_session=False)
 
-    # Revocar todos los codigos del hospital para trazabilidad
     now = datetime.utcnow()
     (
         db.query(HospitalCode)
@@ -267,10 +262,8 @@ def admin_delete_hospital(hospital_id: int, db: Session = Depends(get_db), user=
         .update({HospitalCode.revoked_at: now}, synchronize_session=False)
     )
 
-    # Desasociar medicos del hospital (id_hospital puede ser NULL)
     db.query(Medico).filter(Medico.id_hospital == hospital_id).update({Medico.id_hospital: None}, synchronize_session=False)
 
-    # Borrar el hospital
     db.query(Hospital).filter(Hospital.id_hospital == hospital_id).delete(synchronize_session=False)
 
     db.commit()

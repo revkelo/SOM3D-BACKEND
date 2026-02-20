@@ -53,7 +53,6 @@ def start_subscription(payload: StartSubscriptionIn, db: Session = Depends(get_d
     if not plan:
         raise HTTPException(status_code=404, detail="Plan no encontrado")
 
-    # Resolver titular (médico del usuario autenticado)
     medico = db.query(Medico).filter(Medico.id_usuario == user.id_usuario).first()
     if not medico and getattr(user, "rol", None) == "MEDICO":
         medico = Medico(id_usuario=user.id_usuario)
@@ -65,7 +64,6 @@ def start_subscription(payload: StartSubscriptionIn, db: Session = Depends(get_d
     if medico_id is None:
         raise HTTPException(status_code=400, detail="No se pudo resolver el medico titular.")
 
-    # Evitar múltiples suscripciones ACTIVA para el mismo titular (médico)
     active_q = db.query(Suscripcion).filter(
         Suscripcion.estado == "ACTIVA",
         Suscripcion.id_medico == medico_id,
@@ -73,7 +71,6 @@ def start_subscription(payload: StartSubscriptionIn, db: Session = Depends(get_d
     if active_q.first():
         raise HTTPException(status_code=409, detail="Ya existe una suscripcion ACTIVA para este titular. Debe cancelarla o esperar a su expiracion.")
 
-    # Reutilizar una PAUSADA del mismo titular y plan si existe
     paused_q = db.query(Suscripcion).filter(
         Suscripcion.estado == "PAUSADA",
         Suscripcion.id_plan == plan.id_plan,
@@ -86,13 +83,12 @@ def start_subscription(payload: StartSubscriptionIn, db: Session = Depends(get_d
             id_medico=medico_id,
             id_hospital=None,
             id_plan=plan.id_plan,
-            estado="PAUSADA",  # Se activará en /epayco/confirmation (pago aprobado)
+            estado="PAUSADA",                                                       
         )
         db.add(sus)
         db.commit()
         db.refresh(sus)
 
-    # Importante: ePayco exige que el invoice sea unico por intento de cobro
     invoice = _unique_invoice("3DVinciStudio", sus.id_suscripcion)
     amount = f"{float(plan.precio):.2f}"
     name = f"Plan {plan.nombre}"
@@ -117,7 +113,6 @@ def start_subscription(payload: StartSubscriptionIn, db: Session = Depends(get_d
 
 @router.get("/subscriptions/mine")
 def my_subscription(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    # Resolver titular (médico del usuario)
     medico = db.query(Medico).filter(Medico.id_usuario == user.id_usuario).first()
     medico_id = medico.id_medico if medico else None
     if medico_id is None:
@@ -205,9 +200,6 @@ def my_subscription_status(db: Session = Depends(get_db), user=Depends(get_curre
     }
 
 
-# --------------------
-# Admin endpoints
-# --------------------
 
 def _ensure_admin(user):
     if getattr(user, "rol", None) != "ADMINISTRADOR":
@@ -293,7 +285,6 @@ def update_subscription(
     if not sus:
         raise HTTPException(status_code=404, detail="Suscripcion no encontrada")
 
-    # Si se va a activar, verificar que no exista otra ACTIVA para el mismo médico
     data = payload.model_dump(exclude_unset=True)
     new_id_medico = data["id_medico"] if "id_medico" in data else sus.id_medico
     new_id_hospital = data["id_hospital"] if "id_hospital" in data else sus.id_hospital
@@ -329,7 +320,6 @@ def delete_subscription(suscripcion_id: int, db: Session = Depends(get_db), user
     if not sus:
         raise HTTPException(status_code=404, detail="Suscripcion no encontrada")
 
-    # Borrar pagos primero, luego la suscripción
     db.query(Pago).filter(Pago.id_suscripcion == suscripcion_id).delete(synchronize_session=False)
     db.query(Suscripcion).filter(Suscripcion.id_suscripcion == suscripcion_id).delete(synchronize_session=False)
     db.commit()

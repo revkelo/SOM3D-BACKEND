@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi import HTTPException
 import os
 
 from dotenv import load_dotenv, find_dotenv
@@ -106,3 +107,53 @@ def health():
     services = run_health_checks()
     overall = "ok" if all(s.get("status") == "ok" for s in services.values()) else "error"
     return {"status": overall, "services": services}
+
+
+@app.get("/gpu", tags=["health"])
+def gpu_check():
+    try:
+        import torch
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Unable to import torch: {exc}") from exc
+
+    result = {
+        "torch": getattr(torch, "__version__", None),
+        "torch_cuda": getattr(getattr(torch, "version", None), "cuda", None),
+        "cuda_available": bool(torch.cuda.is_available()),
+    }
+
+    if not result["cuda_available"]:
+        result["status"] = "error"
+        result["error"] = "torch.cuda.is_available() = False (no GPU/CUDA visible)."
+        return result
+
+    props = torch.cuda.get_device_properties(0)
+    major = int(getattr(props, "major", 0))
+    minor = int(getattr(props, "minor", 0))
+    result.update(
+        {
+            "status": "ok",
+            "gpu": getattr(props, "name", None),
+            "capability": f"sm_{major}{minor} (compute {major}.{minor})",
+        }
+    )
+
+    if hasattr(torch.cuda, "get_arch_list"):
+        try:
+            result["torch_arch_list"] = torch.cuda.get_arch_list()
+        except Exception:
+            result["torch_arch_list"] = []
+
+    try:
+        a = torch.randn((2048, 2048), device="cuda", dtype=torch.float16)
+        b = torch.randn((2048, 2048), device="cuda", dtype=torch.float16)
+        c = a @ b
+        torch.cuda.synchronize()
+        result["matmul_ok"] = True
+        result["matmul_sample"] = float(c[0, 0])
+    except RuntimeError as exc:
+        result["status"] = "error"
+        result["matmul_ok"] = False
+        result["error"] = f"RuntimeError during CUDA matmul (possible SM mismatch): {exc}"
+
+    return result

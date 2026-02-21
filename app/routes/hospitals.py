@@ -1,4 +1,5 @@
 from datetime import datetime
+import os
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -13,9 +14,17 @@ from ..core.config import EPAYCO_PUBLIC_KEY, EPAYCO_TEST, BASE_URL
 router = APIRouter()
 
 
+def _public_base_url() -> str:
+    raw = (os.getenv("NGROK_URL") or BASE_URL or "").strip().rstrip("/")
+    if raw and not raw.lower().startswith(("http://", "https://")):
+        raw = f"https://{raw}"
+    return raw
+
+
 def _build_onpage_html(amount: str, name: str, description: str, invoice: str, extra1: str):
-    response_url = f"{BASE_URL}/epayco/response?ngrok-skip-browser-warning=1"
-    confirmation_url = f"{BASE_URL}/epayco/confirmation"
+    base_url = _public_base_url()
+    response_url = f"{base_url}/epayco/response?ngrok-skip-browser-warning=1"
+    confirmation_url = f"{base_url}/epayco/confirmation"
     return f"""
 <script src=\"https://s3-us-west-2.amazonaws.com/epayco/v1.0/checkoutEpayco.js\"
   class=\"epayco-button\"
@@ -318,6 +327,7 @@ def hospital_start_subscription(payload: HospitalStartSubscriptionIn, db: Sessio
     name = f"Plan {plan.nombre} (Hospital)"
     description = f"Suscripcion {plan.periodo} ({plan.duracion_meses} meses)"
 
+    base_url = _public_base_url()
     checkout = {
         "key": EPAYCO_PUBLIC_KEY,
         "amount": amount,
@@ -325,8 +335,8 @@ def hospital_start_subscription(payload: HospitalStartSubscriptionIn, db: Sessio
         "description": description,
         "currency": "cop",
         "test": EPAYCO_TEST,
-        "response": f"{BASE_URL}/epayco/response",
-        "confirmation": f"{BASE_URL}/epayco/confirmation",
+        "response": f"{base_url}/epayco/response",
+        "confirmation": f"{base_url}/epayco/confirmation",
         "invoice": invoice,
         "extra1": str(sus.id_suscripcion),
     }

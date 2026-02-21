@@ -245,10 +245,15 @@ def _probe_gpu_runtime() -> Dict[str, Any]:
         },
         "torch": {
             "installed": False,
+            "version": None,
             "cuda_available": False,
             "cuda_version": None,
             "device_count": 0,
             "devices": [],
+            "devices_info": [],
+            "arch_list": [],
+            "arch_flags": "",
+            "matmul": {"ok": False, "sample": None, "error": None},
             "error": None,
         },
         "cupy": {
@@ -297,13 +302,55 @@ def _probe_gpu_runtime() -> Dict[str, Any]:
         import torch  # type: ignore
 
         out["torch"]["installed"] = True
+        out["torch"]["version"] = getattr(torch, "__version__", None)
         out["torch"]["cuda_version"] = getattr(torch.version, "cuda", None)
         cuda_ok = bool(torch.cuda.is_available())
         out["torch"]["cuda_available"] = cuda_ok
+
+        if hasattr(torch.cuda, "get_arch_list"):
+            try:
+                out["torch"]["arch_list"] = torch.cuda.get_arch_list()
+            except Exception:
+                out["torch"]["arch_list"] = []
+
+        try:
+            out["torch"]["arch_flags"] = str(torch._C._cuda_getArchFlags() or "")
+        except Exception:
+            out["torch"]["arch_flags"] = ""
+
         if cuda_ok:
             cnt = int(torch.cuda.device_count())
             out["torch"]["device_count"] = cnt
             out["torch"]["devices"] = [torch.cuda.get_device_name(i) for i in range(cnt)]
+            devices_info: list[dict[str, Any]] = []
+            for i in range(cnt):
+                try:
+                    props = torch.cuda.get_device_properties(i)
+                    major = int(getattr(props, "major", 0))
+                    minor = int(getattr(props, "minor", 0))
+                    total_mem = int(getattr(props, "total_memory", 0) or 0)
+                    devices_info.append(
+                        {
+                            "index": i,
+                            "name": getattr(props, "name", None),
+                            "capability": f"sm_{major}{minor} (compute {major}.{minor})",
+                            "total_memory_mb": int(total_mem / (1024 * 1024)) if total_mem else 0,
+                        }
+                    )
+                except Exception as ex:
+                    devices_info.append({"index": i, "error": str(ex)})
+            out["torch"]["devices_info"] = devices_info
+
+            try:
+                a = torch.randn((2048, 2048), device="cuda", dtype=torch.float16)
+                b = torch.randn((2048, 2048), device="cuda", dtype=torch.float16)
+                c = a @ b
+                torch.cuda.synchronize()
+                out["torch"]["matmul"]["ok"] = True
+                out["torch"]["matmul"]["sample"] = float(c[0, 0])
+            except Exception as ex:
+                out["torch"]["matmul"]["ok"] = False
+                out["torch"]["matmul"]["error"] = str(ex)
     except Exception as ex:
         out["torch"]["error"] = str(ex)
 

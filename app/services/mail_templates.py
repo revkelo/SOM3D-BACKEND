@@ -1,7 +1,6 @@
 from html import escape as _esc
 from datetime import datetime
 
-# ======== SHELL ========
 
 def _shell_html(
     title: str,
@@ -19,7 +18,6 @@ def _shell_html(
     year = datetime.now().year
     title_e = _esc(title)
 
-    # Paleta + estilos pensados para clientes de correo (inline en lo crítico)
     css = """
     body{margin:0;padding:0;background:#0b0f17;color:#cbd5e1;}
     a{color:#10d4ed;text-decoration:none;}
@@ -48,14 +46,13 @@ def _shell_html(
     .quote{border-left:3px solid #2a3a4f;padding-left:12px;margin:12px 0;}
     """
 
-    # Soporte <bold> y neutralización de patrones que Gmail colapsa
     content_html = (
         content
-        .replace("<bold>", "<b>").replace("</bold>", "</b>")          # alias <bold>
-        .replace("<blockquote", "<div class='quote'")                 # evita blockquote
+        .replace("<bold>", "<b>").replace("</bold>", "</b>")                        
+        .replace("<blockquote", "<div class='quote'")                                   
         .replace("</blockquote>", "</div>")
-        .replace("gmail_quote", "x-gmail-quote")                      # evita clase especial de Gmail
-        .replace("\n-- ", "\n— ")                                     # evita separador de firma
+        .replace("gmail_quote", "x-gmail-quote")                                                     
+        .replace("\n-- ", "\n— ")                                                               
     )
 
     return f"""<!doctype html>
@@ -93,7 +90,6 @@ def _shell_html(
 </body>
 </html>"""
 
-# ======== HELPERS ========
 
 def _btn_primary(href: str, label: str = "Abrir") -> str:
     """Botón con estilos inline para compatibilidad alta (Outlook, etc.)."""
@@ -105,7 +101,6 @@ def _btn_primary(href: str, label: str = "Abrir") -> str:
         f"{_esc(label)}</span></a>"
     )
 
-# ======== TEMPLATES ========
 
 def template_reset_link(nombre: str, link: str, expire_min: int) -> str:
     body = (

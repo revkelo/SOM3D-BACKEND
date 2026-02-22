@@ -68,12 +68,10 @@ def delete_inactive_user(id_usuario: int, db: Session = Depends(get_db), user=De
     if u.rol == "ADMINISTRADOR":
         raise HTTPException(status_code=403, detail="No se pueden borrar usuarios ADMINISTRADOR")
 
-    # Si es médico, eliminar en cascada dependencias, suscripciones/pagos y jobs
     m = db.query(Medico).filter(Medico.id_usuario == u.id_usuario).first()
     if m:
         id_medico = m.id_medico
         p_ids = [row[0] for row in db.query(Paciente.id_paciente).filter(Paciente.id_medico == id_medico).all()]
-        # Limpiar mensajes vinculados al medico/pacientes antes de borrar pacientes
         if p_ids:
             db.query(Mensaje).filter((Mensaje.id_medico == id_medico) | (Mensaje.id_paciente.in_(p_ids))).delete(synchronize_session=False)
         else:

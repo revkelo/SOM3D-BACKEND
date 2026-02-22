@@ -29,8 +29,6 @@ def _ensure_owner(db: Session, user: Usuario, paciente_id: int | None, id_jobstl
                     med_owner = db.query(Medico).filter(Medico.id_usuario == jc.id_usuario).first()
                     if med_owner:
                         return int(med_owner.id_medico), None
-        # Fallback para admin sin paciente: usar su perfil de medico si existe,
-        # o el primer medico disponible en el sistema.
         med_self = db.query(Medico).filter(Medico.id_usuario == user.id_usuario).first()
         if med_self:
             return int(med_self.id_medico), None

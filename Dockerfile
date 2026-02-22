@@ -1,12 +1,16 @@
 # syntax=docker/dockerfile:1.6
 
-ARG TORCH_VER=2.3.1
+ARG TORCH_VER=2.10.0
+ARG CUDA_VER=12.8
+ARG CUDNN_VER=9
 ARG CUPY_VER=13.0.0
 
 ############################
 # Stage GPU (default runtime)
 ############################
-FROM pytorch/pytorch:${TORCH_VER}-cuda12.1-cudnn8-runtime AS final
+FROM pytorch/pytorch:${TORCH_VER}-cuda${CUDA_VER}-cudnn${CUDNN_VER}-runtime AS final
+
+ARG CUPY_VER=13.0.0
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 libglib2.0-0 libxrender1 libsm6 libxext6 libglvnd0 \
@@ -22,9 +26,9 @@ ENV PYTHONUNBUFFERED=1 \
 
 # torch/torchvision/torchaudio come from the CUDA base image.
 COPY requirements.txt ./
-RUN pip install -U pip setuptools wheel \
- && pip install cupy-cuda12x==${CUPY_VER} \
- && pip install -r requirements.txt
+RUN python -m pip install --break-system-packages -U pip setuptools wheel \
+ && python -m pip install --break-system-packages cupy-cuda12x==${CUPY_VER} \
+ && python -m pip install --break-system-packages -r requirements.txt
 
 COPY . .
 

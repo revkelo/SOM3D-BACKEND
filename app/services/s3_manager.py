@@ -1,4 +1,3 @@
-# s3_manager.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -31,7 +30,6 @@ class S3Config:
     secret_key: Optional[str] = None
 
     def __post_init__(self):
-        # normaliza prefix: sin dobles // y terminando en /
         p = (self.prefix or "").strip()
         while "//" in p:
             p = p.replace("//", "/")
@@ -44,18 +42,15 @@ class S3Manager:
     """
     Wrapper simple sobre boto3 para S3/MinIO, con helpers que usa tu backend.
     """
-    # Exponer excepciones para captura externa
     ClientError = _BotoClientError
     EndpointError = _BotoEndpointError
 
     def __init__(self, cfg: S3Config):
         self.cfg = cfg
 
-        # SSL según flag insecure
         use_ssl = not bool(cfg.insecure)
         endpoint_url = cfg.endpoint or os.getenv("S3_ENDPOINT")
 
-        # Addressing path-style ayuda mucho con MinIO detrás de proxies
         bc = BotoConfig(
             signature_version="s3v4",
             s3={"addressing_style": "path"},
@@ -70,11 +65,10 @@ class S3Manager:
             aws_access_key_id=cfg.access_key or os.getenv("AWS_ACCESS_KEY_ID"),
             aws_secret_access_key=cfg.secret_key or os.getenv("AWS_SECRET_ACCESS_KEY"),
             use_ssl=use_ssl,
-            verify=True if use_ssl else False,  # si es http, desactiva verify
+            verify=True if use_ssl else False,                                
             config=bc,
         )
 
-    # ------------------ Normalización de keys ------------------
 
     @staticmethod
     def _norm(*parts: str) -> str:
@@ -104,7 +98,6 @@ class S3Manager:
             return self._norm(*parts)
         return self._norm(prefix, *parts)
 
-    # ------------------ Bucket ------------------
 
     def ensure_bucket(self) -> None:
         """
@@ -116,10 +109,8 @@ class S3Manager:
         except self.ClientError as e:
             code = int(e.response.get("ResponseMetadata", {}).get("HTTPStatusCode", 0))
             if code not in (404, 301, 400):
-                # Errores de auth/permiso, etc.
                 raise
 
-        # Intentar crear el bucket (maneja carrera si otro proceso lo crea)
         if self.cfg.region and self.cfg.region.lower() != "us-east-1":
             self.client.create_bucket(
                 Bucket=self.cfg.bucket,
@@ -128,7 +119,6 @@ class S3Manager:
         else:
             self.client.create_bucket(Bucket=self.cfg.bucket)
 
-    # ------------------ IO primitivas ------------------
 
     def upload_file(self, local_path: str, key: str) -> None:
         k = self._norm(key)
@@ -167,7 +157,6 @@ class S3Manager:
         k = self._norm(key)
         self.client.delete_object(Bucket=self.cfg.bucket, Key=k)
 
-    # ------------------ Listado ------------------
 
     def list(self, prefix: Optional[str] = None) -> List[str]:
         """
@@ -208,7 +197,6 @@ class S3Manager:
             out.extend(contents)
         return out
 
-    # ------------------ Pre-signed ------------------
 
     def presign_get(self, key: str, expires: int = 3600) -> str:
         """

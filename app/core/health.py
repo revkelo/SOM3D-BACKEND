@@ -57,7 +57,6 @@ def check_s3() -> Dict[str, Any]:
     try:
         s3 = S3Manager(cfg)
         s3.ensure_bucket()
-        # A light call to confirm connectivity; head_bucket is already called by ensure_bucket.
         return {
             "status": "ok",
             "bucket": cfg.bucket,

@@ -1,4 +1,4 @@
-﻿# app/routes/messages.py
+                        
 import json
 import re
 from datetime import datetime
@@ -39,9 +39,6 @@ def _clean_text(value: str, max_len: int) -> str:
     return _norm_spaces(value).replace("<", "").replace(">", "")[:max_len]
 
 
-# ---------------------------
-# Helpers
-# ---------------------------
 def _get_user_id(current_user: Any) -> Optional[int]:
     if isinstance(current_user, dict):
         return current_user.get("id_usuario")
@@ -88,9 +85,6 @@ def _parse_json(raw: str | None):
         return {"raw": raw}
 
 
-# ---------------------------
-# Crear mensaje (FormData)
-# ---------------------------
 @router.post("/", response_model=MensajeOut, status_code=status.HTTP_201_CREATED)
 async def crear_mensaje(
     tipo: Literal["sugerencia", "error"] = Form(...),
@@ -142,9 +136,6 @@ async def crear_mensaje(
     return m
 
 
-# ---------------------------
-# Listar mensajes (paginado + filtros)
-# ---------------------------
 @router.get("/", response_model=MensajeList)
 def listar_mensajes(
     page: int = Query(1, ge=1),
@@ -175,9 +166,6 @@ def listar_mensajes(
     return {"total": total, "items": items}
 
 
-# ---------------------------
-# Marcar como leido (JSON body)
-# ---------------------------
 class LeidoIn(BaseModel):
     leido_medico: bool
 
@@ -443,7 +431,6 @@ def admin_actualizar_mensaje(
             gestion.asignado_admin_id_usuario = new_assignee
             changed["asignado_admin_id_usuario"] = {"old": old_assignee, "new": new_assignee}
 
-    # Si el admin respondio, el medico debe ver ese mensaje como no leido.
     if respuesta_nueva:
         m.leido_medico = False
         changed["leido_medico"] = {"old": True, "new": False}

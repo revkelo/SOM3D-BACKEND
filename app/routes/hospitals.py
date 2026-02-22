@@ -1,4 +1,5 @@
-﻿from datetime import datetime
+from datetime import datetime
+import os
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -13,9 +14,17 @@ from ..core.config import EPAYCO_PUBLIC_KEY, EPAYCO_TEST, BASE_URL
 router = APIRouter()
 
 
+def _public_base_url() -> str:
+    raw = (os.getenv("NGROK_URL") or BASE_URL or "").strip().rstrip("/")
+    if raw and not raw.lower().startswith(("http://", "https://")):
+        raw = f"https://{raw}"
+    return raw
+
+
 def _build_onpage_html(amount: str, name: str, description: str, invoice: str, extra1: str):
-    response_url = f"{BASE_URL}/epayco/response?ngrok-skip-browser-warning=1"
-    confirmation_url = f"{BASE_URL}/epayco/confirmation"
+    base_url = _public_base_url()
+    response_url = f"{base_url}/epayco/response?ngrok-skip-browser-warning=1"
+    confirmation_url = f"{base_url}/epayco/confirmation"
     return f"""
 <script src=\"https://s3-us-west-2.amazonaws.com/epayco/v1.0/checkoutEpayco.js\"
   class=\"epayco-button\"
@@ -60,7 +69,6 @@ def _resolve_hospital_by_code(
                 raise HTTPException(status_code=409, detail="Codigo expirado")
         return h, hc
 
-    # Compatibilidad con datos legacy: Hospital.codigo sin registro en HospitalCode
     h = db.query(Hospital).filter(Hospital.codigo == codigo).first()
     if not h:
         raise HTTPException(status_code=404, detail="Hospital no encontrado")
@@ -68,7 +76,6 @@ def _resolve_hospital_by_code(
         raise HTTPException(status_code=404, detail="Hospital no encontrado o inactivo")
 
     if require_code_usable:
-        # El primer uso de codigo legacy se registra y queda consumido.
         hc = HospitalCode(
             id_hospital=h.id_hospital,
             codigo=codigo,
@@ -83,7 +90,6 @@ def _resolve_hospital_by_code(
 @router.get("/hospitals/by-code/{codigo}")
 def hospital_by_code(codigo: str, db: Session = Depends(get_db)):
     h, hc = _resolve_hospital_by_code(db, codigo, require_code_usable=False)
-    # Determinar si tiene una suscripcion ACTIVA directa
     has_active = (
         db.query(Suscripcion)
         .filter(
@@ -116,7 +122,6 @@ def hospital_status(codigo: str, db: Session = Depends(get_db)):
     """Devuelve estado de suscripcion del hospital por codigo: plan, expiracion y ultimo pago."""
     h, _ = _resolve_hospital_by_code(db, codigo, require_code_usable=False, require_active_hospital=False)
 
-    # Preferir suscripcion ACTIVA, si no, la ultima PAUSADA
     sus_act = (
         db.query(Suscripcion)
         .filter(
@@ -222,7 +227,6 @@ def my_hospital_status(db: Session = Depends(get_db), user=Depends(get_current_u
 
 @router.post("/hospitals/link-by-code")
 def link_hospital_by_code(payload: HospitalLinkByCodeIn, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    # Solo medicos pueden vincularse
     if getattr(user, "rol", None) != "MEDICO":
         raise HTTPException(status_code=403, detail="Solo medicos pueden vincularse a un hospital")
 
@@ -236,7 +240,6 @@ def link_hospital_by_code(payload: HospitalLinkByCodeIn, db: Session = Depends(g
     else:
         m.id_hospital = h.id_hospital
 
-    # Consumir codigo para asegurar uso unico.
     if hc and (hc.used_at is None or hc.usado_por_id_medico is None):
         if hc.used_at is None:
             hc.used_at = datetime.utcnow()
@@ -249,7 +252,6 @@ def link_hospital_by_code(payload: HospitalLinkByCodeIn, db: Session = Depends(g
         is not None
     )
 
-    # Si el hospital tiene suscripcion activa, activar acceso del medico vinculado.
     if has_active:
         m.estado = "ACTIVO"
         user.activo = True
@@ -274,7 +276,6 @@ def hospital_start_subscription(payload: HospitalStartSubscriptionIn, db: Sessio
         plan = db.query(Plan).filter(Plan.id_plan == payload.plan_id).first()
         if not plan:
             raise HTTPException(status_code=404, detail="Plan no encontrado")
-        # Reutilizar suscripcion PAUSADA del mismo hospital y plan si existe
         sus = (
             db.query(Suscripcion)
             .filter(
@@ -296,7 +297,6 @@ def hospital_start_subscription(payload: HospitalStartSubscriptionIn, db: Sessio
             db.commit()
             db.refresh(sus)
     else:
-        # Sin plan_id: tomar la ultima suscripcion PAUSADA del hospital
         sus = (
             db.query(Suscripcion)
             .filter(
@@ -320,7 +320,6 @@ def hospital_start_subscription(payload: HospitalStartSubscriptionIn, db: Sessio
             raise HTTPException(status_code=404, detail="El hospital no tiene una suscripcion pendiente (PAUSADA)")
         plan = db.query(Plan).filter(Plan.id_plan == sus.id_plan).first()
 
-    # ePayco requiere invoice unico por intento
     import secrets
 
     invoice = f"3DVinciStudio-H{h.id_hospital}-S{sus.id_suscripcion}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{secrets.token_hex(2)}"
@@ -328,6 +327,7 @@ def hospital_start_subscription(payload: HospitalStartSubscriptionIn, db: Sessio
     name = f"Plan {plan.nombre} (Hospital)"
     description = f"Suscripcion {plan.periodo} ({plan.duracion_meses} meses)"
 
+    base_url = _public_base_url()
     checkout = {
         "key": EPAYCO_PUBLIC_KEY,
         "amount": amount,
@@ -335,8 +335,8 @@ def hospital_start_subscription(payload: HospitalStartSubscriptionIn, db: Sessio
         "description": description,
         "currency": "cop",
         "test": EPAYCO_TEST,
-        "response": f"{BASE_URL}/epayco/response",
-        "confirmation": f"{BASE_URL}/epayco/confirmation",
+        "response": f"{base_url}/epayco/response",
+        "confirmation": f"{base_url}/epayco/confirmation",
         "invoice": invoice,
         "extra1": str(sus.id_suscripcion),
     }

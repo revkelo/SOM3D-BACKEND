@@ -1,4 +1,4 @@
-﻿import hashlib, json
+import hashlib, json
 from datetime import datetime
 import html
 from typing import Dict, Any, Optional
@@ -54,9 +54,7 @@ def _upsert_webhook_event(
     ev.attempts = int(getattr(ev, "attempts", 0) or 0) + 1
     ev.last_error = None
 
-    # Si tu modelo NO tiene processed, esto evita romper.
     if not hasattr(ev, "processed"):
-        # no hacemos nada; solo evitamos acceder luego sin check
         pass
 
     db.flush()
@@ -95,7 +93,6 @@ def _send_payment_confirmation_email(db: Session, sus: Suscripcion, plan: Option
             )
             send_email(str(hosp.correo), "Pago confirmado - 3DVinci Health", body_html)
     except Exception:
-        # Nunca romper confirmación por fallo de correo.
         pass
 
 
@@ -207,7 +204,6 @@ async def _read_epayco_payload(request: Request, method: str) -> Dict[str, Any]:
     if method == "GET":
         return dict(request.query_params)
 
-    # POST
     form = await request.form()
     if form:
         return dict(form)
@@ -216,7 +212,6 @@ async def _read_epayco_payload(request: Request, method: str) -> Dict[str, Any]:
     if isinstance(js, dict):
         return js
 
-    # fallback silencioso
     js2 = await request.json() if request.body else None
     return js2 if isinstance(js2, dict) else {}
 
@@ -231,7 +226,6 @@ def _verify_signature(payload: Dict[str, Any]) -> tuple[bool, str]:
     sign_raw = f"{P_CUST_ID_CLIENTE}^{P_KEY}^{x_ref_payco}^{x_transaction_id}^{x_amount}^{x_currency_code}"
     expected = hashlib.sha256(sign_raw.encode("utf-8")).hexdigest()
 
-    # compare seguro (evita problemas de timing y falsos)
     return hmac.compare_digest(expected, x_signature), expected
 
 
@@ -243,13 +237,12 @@ async def _epayco_confirmation_impl(method: str, request: Request, db: Session) 
     x_amount_raw     = str(payload.get("x_amount", "") or "")
     x_currency_code  = str(payload.get("x_currency_code", "") or "")
     x_cod_response   = str(payload.get("x_cod_response", "") or "")
-    x_extra1         = payload.get("x_extra1")      # suscripcion_id
-    x_id_invoice     = payload.get("x_id_invoice")  # "SOM3D-<suscripcion_id>"
+    x_extra1         = payload.get("x_extra1")                      
+    x_id_invoice     = payload.get("x_id_invoice")                            
 
     firma_ok, expected_sig = _verify_signature(payload)
     estado = STATUS_MAP.get(x_cod_response, "DESCONOCIDO")
 
-    # Guarda evento (idempotencia por ref_payco)
     webhook_event = None
     try:
         if x_ref_payco:
@@ -262,7 +255,6 @@ async def _epayco_confirmation_impl(method: str, request: Request, db: Session) 
                 payload=payload,
             )
 
-            # Si existe processed en tu modelo y ya fue procesado, devolvemos 200 OK sin reprocesar
             if webhook_event and hasattr(webhook_event, "processed") and _safe_bool(getattr(webhook_event, "processed", False)):
                 db.commit()
                 return JSONResponse(
@@ -279,15 +271,12 @@ async def _epayco_confirmation_impl(method: str, request: Request, db: Session) 
                 )
     except SQLAlchemyError as e:
         db.rollback()
-        # Nunca devuelvas 500 al webhook por logging: responde 200 para no buclear reintentos
         return JSONResponse({"ok": True, "warning": "db_log_failed", "detail": str(e)}, status_code=200)
 
-    # Lógica principal: SOLO si firma es OK y aprobado
     if firma_ok and estado == "APROBADO" and x_extra1:
         try:
             sus_id = int(x_extra1)
         except Exception:
-            # Extra1 inválido: respondemos 200 para evitar reintentos, pero lo dejamos registrado
             if webhook_event and hasattr(webhook_event, "last_error"):
                 webhook_event.last_error = "x_extra1 no es int"
                 db.commit()
@@ -301,7 +290,6 @@ async def _epayco_confirmation_impl(method: str, request: Request, db: Session) 
                 db.commit()
                 return JSONResponse({"ok": True, "warning": "sus_not_found", "ref": x_ref_payco, "suscripcion": sus_id}, status_code=200)
 
-            # Idempotencia por referencia epayco
             existing_pago = db.query(Pago).filter(Pago.referencia_epayco == x_ref_payco).first()
             if existing_pago:
                 if webhook_event and hasattr(webhook_event, "processed"):
@@ -309,7 +297,6 @@ async def _epayco_confirmation_impl(method: str, request: Request, db: Session) 
                 db.commit()
                 return JSONResponse({"ok": True, "duplicado": True, "ref": x_ref_payco, "suscripcion": sus_id}, status_code=200)
 
-            # OJO: para firma usamos x_amount_raw; pero para guardar monto sí necesitamos número
             try:
                 monto_num = float(x_amount_raw) if x_amount_raw else 0.0
             except Exception:
@@ -338,7 +325,6 @@ async def _epayco_confirmation_impl(method: str, request: Request, db: Session) 
 
             db.commit()
 
-            # Correo fuera del commit (y nunca debe tumbar el webhook)
             _send_payment_confirmation_email(db=db, sus=sus, plan=plan, ref=x_ref_payco, amount=x_amount_raw or "0", when=now)
 
         except SQLAlchemyError as e:
@@ -352,7 +338,6 @@ async def _epayco_confirmation_impl(method: str, request: Request, db: Session) 
             return JSONResponse({"ok": True, "warning": "db_failed", "detail": str(e), "ref": x_ref_payco}, status_code=200)
 
     else:
-        # Si no es aprobado, igual 200 OK, pero registramos estado
         try:
             db.commit()
         except SQLAlchemyError:

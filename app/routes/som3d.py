@@ -11,7 +11,7 @@ import tempfile
 import time
 import uuid
 from dataclasses import dataclass, asdict
-from multiprocessing import Process
+import multiprocessing as mp
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -51,7 +51,6 @@ def _ensure_job_access(db: Session, user: Any, job_id: str) -> None:
         .first()
     )
     if not owner:
-        # Evita filtrar existencia de jobs de terceros.
         raise HTTPException(status_code=404, detail="Job no encontrado")
 
 
@@ -77,7 +76,6 @@ def _delete_job_artifacts_s3(job_id: str) -> int:
     keys = s3.list(base_key)
     for key in keys:
         s3.delete(key)
-    # Borra tambien un posible objeto "folder marker" del prefijo base.
     try:
         s3.delete(base_key)
     except Exception:
@@ -95,7 +93,6 @@ def _env_bool(name: str, default: bool = False) -> bool:
 S3: Optional[S3Manager] = None
 DEFAULT_PREFIX = os.getenv("S3_PREFIX", "jobs/")
 RESULT_SUBDIR = "stls"
-# Mantener constante por compatibilidad, pero no se subirá el log a S3
 LOG_KEY = "job.log"
 MANIFEST_KEY = "manifest.json"
 INPUT_ZIP = "input.zip"
@@ -248,10 +245,15 @@ def _probe_gpu_runtime() -> Dict[str, Any]:
         },
         "torch": {
             "installed": False,
+            "version": None,
             "cuda_available": False,
             "cuda_version": None,
             "device_count": 0,
             "devices": [],
+            "devices_info": [],
+            "arch_list": [],
+            "arch_flags": "",
+            "matmul": {"ok": False, "sample": None, "error": None},
             "error": None,
         },
         "cupy": {
@@ -262,7 +264,6 @@ def _probe_gpu_runtime() -> Dict[str, Any]:
         },
     }
 
-    # 1) Deteccion por driver/SO
     try:
         smi = subprocess.run(
             [
@@ -297,22 +298,62 @@ def _probe_gpu_runtime() -> Dict[str, Any]:
     except Exception as ex:
         out["nvidia_smi"]["error"] = str(ex)
 
-    # 2) Deteccion por torch (si esta instalado)
     try:
         import torch  # type: ignore
 
         out["torch"]["installed"] = True
+        out["torch"]["version"] = getattr(torch, "__version__", None)
         out["torch"]["cuda_version"] = getattr(torch.version, "cuda", None)
         cuda_ok = bool(torch.cuda.is_available())
         out["torch"]["cuda_available"] = cuda_ok
+
+        if hasattr(torch.cuda, "get_arch_list"):
+            try:
+                out["torch"]["arch_list"] = torch.cuda.get_arch_list()
+            except Exception:
+                out["torch"]["arch_list"] = []
+
+        try:
+            out["torch"]["arch_flags"] = str(torch._C._cuda_getArchFlags() or "")
+        except Exception:
+            out["torch"]["arch_flags"] = ""
+
         if cuda_ok:
             cnt = int(torch.cuda.device_count())
             out["torch"]["device_count"] = cnt
             out["torch"]["devices"] = [torch.cuda.get_device_name(i) for i in range(cnt)]
+            devices_info: list[dict[str, Any]] = []
+            for i in range(cnt):
+                try:
+                    props = torch.cuda.get_device_properties(i)
+                    major = int(getattr(props, "major", 0))
+                    minor = int(getattr(props, "minor", 0))
+                    total_mem = int(getattr(props, "total_memory", 0) or 0)
+                    devices_info.append(
+                        {
+                            "index": i,
+                            "name": getattr(props, "name", None),
+                            "capability": f"sm_{major}{minor} (compute {major}.{minor})",
+                            "total_memory_mb": int(total_mem / (1024 * 1024)) if total_mem else 0,
+                        }
+                    )
+                except Exception as ex:
+                    devices_info.append({"index": i, "error": str(ex)})
+            out["torch"]["devices_info"] = devices_info
+
+            try:
+                a = torch.randn((2048, 2048), device="cuda", dtype=torch.float16)
+                b = torch.randn((2048, 2048), device="cuda", dtype=torch.float16)
+                c = a @ b
+                torch.cuda.synchronize()
+                out["torch"]["matmul"]["ok"] = True
+                out["torch"]["matmul"]["sample"] = float(c[0, 0])
+            except Exception as ex:
+                out["torch"]["matmul"]["ok"] = False
+                out["torch"]["matmul"]["error"] = str(ex)
     except Exception as ex:
         out["torch"]["error"] = str(ex)
 
-    # 3) Deteccion por cupy (si esta instalado)
     try:
         import cupy as cp  # type: ignore
 
@@ -330,7 +371,6 @@ def _probe_gpu_runtime() -> Dict[str, Any]:
     out["gpu_ready"] = torch_cuda or cupy_cuda
     out["backend"] = "cuda" if out["gpu_ready"] else "cpu"
 
-    # 4) Verificacion post-reinicio (salida real del comando sugerido)
     try:
         chk = subprocess.run(
             [
@@ -358,13 +398,13 @@ class JobManifest:
     job_id: str
     created_at: float
     updated_at: float
-    status: str  # queued|running|done|error|canceled
-    phase: str   # queued|totalsegmentator|converting|zipping|finished|error|canceled
+    status: str                                      
+    phase: str                                                                       
     percent: float
     params: Dict[str, Any]
     metrics: Dict[str, Any]
     error: Optional[str] = None
-    log_tail: List[str] = None  # pequeño tail
+    log_tail: List[str] = None                
     bucket: Optional[str] = None
     s3_prefix: Optional[str] = None
     s3_keys_results: List[str] = None
@@ -416,10 +456,8 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
 
     s3 = S3Manager(S3Config(**s3_cfg))
 
-    # Buffer en memoria para conservar el log completo; al final se sube a S3
     log_buffer: list[str] = []
 
-    # Medición de tiempos por fase
     t_all_start = time.time()
     t_seg_start: Optional[float] = None
     t_conv_start: Optional[float] = None
@@ -460,7 +498,6 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
     def wlog(msg: str):
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
         line = f"[{ts}] {msg}"
-        # Actualizar el manifest con un tail pequeño para progreso en vivo
         try:
             key = s3_key(MANIFEST_KEY)
             try:
@@ -476,7 +513,6 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
             s3.upload_bytes(json.dumps(mani, ensure_ascii=False, indent=2).encode("utf-8"), key)
         except Exception:
             pass
-        # Mantener copia completa en buffer para subirla como logs/job.log
         try:
             log_buffer.append(line)
         except Exception:
@@ -508,7 +544,6 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
             "percent": 99.0
         })
         _update_jobconv("ERROR", set_finished=True)
-        # Intentar subir el log completo recopilado hasta el error
         try:
             full = ("\n".join(log_buffer) + "\n").encode("utf-8") if log_buffer else b""
             s3.upload_bytes(full, s3_key(LOG_KEY), content_type="text/plain; charset=utf-8")
@@ -525,16 +560,13 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
             stl_out.mkdir(parents=True, exist_ok=True)
 
             input_zip = tdir / "input.zip"
-            # Preferir ZIP local pasado desde el proceso padre; fallback a S3 si no existe
             if local_input_zip and Path(local_input_zip).exists():
                 shutil.copy2(local_input_zip, input_zip)
-                # Intentar limpiar el ZIP local original
                 try:
                     src = Path(local_input_zip)
                     base = src.parent
                     src.unlink(missing_ok=True)
                     try:
-                        # borra el directorio padre temporal si queda vacío
                         base.rmdir()
                     except Exception:
                         pass
@@ -593,13 +625,11 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
                 hq_dir = stl_out / "hq_suavizado_decimado"
                 original_dir = stl_out
 
-                # Determinar carpeta final y si existe HQ
                 target = hq_dir if (hq_dir.exists() and any(hq_dir.rglob('*.stl'))) else original_dir
 
                 def count_vertices(stl_path: Path) -> int:
                     try:
                         m = mesh.Mesh.from_file(str(stl_path))
-                        # numpy-stl almacena vértices duplicados por triángulo, así que se eliminan
                         unique_vertices = len(set(map(tuple, m.vectors.reshape(-1, 3).round(5))))
                         return unique_vertices
                     except Exception:
@@ -609,14 +639,12 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
                 total_vertices_hq = 0
                 count_files = 0
 
-                # Contar vértices de modelos originales
                 for f in original_dir.rglob("*.stl"):
                     v = count_vertices(f)
                     total_vertices_original += v
                     count_files += 1
                     wlog(f"Vertices (original) {f.name}: {v}")
 
-                # Contar vértices de modelos HQ si existen
                 if hq_dir.exists():
                     for f in hq_dir.rglob("*.stl"):
                         v = count_vertices(f)
@@ -632,7 +660,6 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
                 else:
                     wlog("No se encontraron modelos HQ; se usan originales como referencia.")
 
-                # Continuar con zipeo y subida
                 write_manifest_patch({"phase": "zipping", "percent": 90.0})
                 t_zip_start = time.time()
                 zip_bytes = _zip_dir_to_bytes(target)
@@ -644,7 +671,6 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
                 save_worker_error("zip_upload", e)
                 return
 
-            # Ya no subimos STL individuales; calcular cuenta localmente
             keys = []
             try:
                 hq_dir = stl_out / "hq_suavizado_decimado"
@@ -654,7 +680,6 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
                 stl_count = 0
             stl_zip_size = int(len(zip_bytes or b""))
             total_seconds = time.time() - t_all_start
-            # Registrar métricas incluyendo tiempos
             write_manifest_patch({
                 "status": "done",
                 "phase": "finished",
@@ -680,7 +705,6 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
                 },
                 "s3_keys_results": keys,
             })
-            # Resumen final de tiempos
             wlog(
                 "Resumen tiempos — "
                 f"Segmentación: {_fmt_dur(seg_seconds)} | "
@@ -690,14 +714,12 @@ def _worker_entry(job_id: str, s3_cfg: Dict[str, Any], params: Dict[str, Any], d
             )
             wlog("Job terminado.")
             _update_jobconv("DONE", set_finished=True)
-            # Subir el log completo a S3 para permitir consulta completa
             try:
                 full = ("\n".join(log_buffer) + "\n").encode("utf-8") if log_buffer else b""
                 s3.upload_bytes(full, s3_key(LOG_KEY), content_type="text/plain; charset=utf-8")
             except Exception:
                 pass
 
-            # Registrar JobSTL en BD (con o sin paciente)
             try:
                 pid = params.get("id_paciente") if isinstance(params, dict) else None
                 if db_url:
@@ -737,7 +759,6 @@ async def create_job(
     db: Session = Depends(get_db),
     user = Depends(get_current_user),
 ):
-    # Validación rápida de variables S3 para errores claros
     _require_s3_env()
     if not file.filename or not file.filename.lower().endswith(".zip"):
         raise HTTPException(status_code=400, detail="Se espera un .zip con DICOMs")
@@ -753,7 +774,6 @@ async def create_job(
     job_id = uuid.uuid4().hex
     s3_prefix = _s3_job_base(job_id)
 
-    # Guardar ZIP en temporal local y NO subir a S3
     tmp_dir = Path(tempfile.mkdtemp(prefix=f"upload_{job_id}_"))
     safe_upload_name = _safe_upload_filename(file.filename or "")
     local_tmp = tmp_dir / safe_upload_name
@@ -829,12 +849,10 @@ async def create_job(
         db_url = mysql_url()
     except Exception:
         db_url = None
-    # Pasar al worker la ruta local del ZIP para evitar subir input.zip a S3
-    proc = Process(target=_worker_entry, args=(job_id, s3_cfg, manifest.params, db_url, str(local_tmp)), daemon=True)
+    proc = mp.Process(target=_worker_entry, args=(job_id, s3_cfg, manifest.params, db_url, str(local_tmp)), daemon=True)
     proc.start()
     _append_log(job_id, f"PID worker: {proc.pid}")
 
-    # Persistencia opcional en BD (JobConv) si tenemos usuario autenticado
     try:
         jc = JobConv(
             job_id=job_id,
@@ -898,7 +916,6 @@ async def list_my_jobs(db: Session = Depends(get_db), user = Depends(get_current
     """Lista solo los jobs creados por el usuario autenticado (JobConv.id_usuario).
     Enriquecido con datos del manifiesto en S3 si existe (status/phase/percent).
     """
-    # Obtener entradas JobConv del usuario
     entries = db.query(JobConv).filter(JobConv.id_usuario == user.id_usuario).order_by(JobConv.updated_at.desc()).all()
     items: List[Dict[str, Any]] = []
     for jc in entries:
@@ -1016,28 +1033,23 @@ async def get_log(
     user = Depends(get_current_user),
 ):
     _ensure_job_access(db, user, job_id)
-    # El log principal se guarda como job.log en la raíz del job.
-    # Si no existe (jobs antiguos o en progreso), se intenta usar el manifest.log_tail como fallback.
     s3 = _ensure_s3()
     log_key = _s3_key(job_id, LOG_KEY)
     lines: list[str] = []
     used_fallback = True
 
-    # Si se solicita el log completo y existe en S3, priorizarlo
     if full:
         try:
             data = s3.download_bytes(log_key)
             lines = data.decode("utf-8", errors="ignore").splitlines()
             used_fallback = False
         except Exception:
-            # Intentar compatibilidad con ruta antigua logs/job.log
             try:
                 old_key = _s3_key(job_id, "logs/job.log")
                 data = s3.download_bytes(old_key)
                 lines = data.decode("utf-8", errors="ignore").splitlines()
                 used_fallback = False
             except Exception:
-                # Si no existe, caer al manifest.log_tail
                 pass
 
     if not lines:
@@ -1045,13 +1057,11 @@ async def get_log(
         if m and m.log_tail:
             lines = list(m.log_tail)
         else:
-            # Compatibilidad si existiera logs/job.log antiguos
             try:
                 data = s3.download_bytes(log_key)
                 lines = data.decode("utf-8", errors="ignore").splitlines()
                 used_fallback = False
             except Exception:
-                # Intentar compatibilidad con ruta antigua logs/job.log
                 try:
                     old_key = _s3_key(job_id, "logs/job.log")
                     data = s3.download_bytes(old_key)
@@ -1068,7 +1078,6 @@ async def get_log(
         except Exception:
             pass
 
-    # Adjuntar estado/fase desde manifest si disponible
     status = None
     phase = None
     try:
@@ -1188,8 +1197,6 @@ async def get_result(
 @router.post("/jobs/{job_id}/finalize", response_model=JobSTLOut)
 async def finalize_job(job_id: str, payload: FinalizeJobIn, db: Session = Depends(get_db), user = Depends(get_current_user)):
     _ensure_job_access(db, user, job_id)
-    # Optionally mark JobConv as DONE and create JobSTL linked to a Paciente
-    # Validate paciente ownership if medico
     med = db.query(Medico).filter(Medico.id_usuario == user.id_usuario).first()
     if med is not None:
         if payload.id_paciente is None:
@@ -1198,7 +1205,6 @@ async def finalize_job(job_id: str, payload: FinalizeJobIn, db: Session = Depend
         if not p or p.id_medico != med.id_medico:
             raise HTTPException(status_code=403, detail="Paciente no pertenece al medico")
 
-    # Update JobConv status if exists
     try:
         jc = db.query(JobConv).filter(JobConv.job_id == job_id).first()
         if jc:
@@ -1246,10 +1252,8 @@ async def delete_jobstl(
         raise HTTPException(status_code=403, detail="No autorizado")
 
     js = _get_jobstl_owned(db, user, id_jobstl)
-    # Refuerza ownership por creador del job para usuarios no admin.
     _ensure_job_access(db, user, js.job_id)
 
-    # Eliminar artefactos del job en MinIO/S3 primero.
     try:
         _delete_job_artifacts_s3(js.job_id)
     except Exception as e:
@@ -1278,7 +1282,6 @@ async def cancel_job(job_id: str, user = Depends(require_admin)):
         return {"status": "not_found"}
 
     pid_to_kill = None
-    # Primero intentar desde el manifest.log_tail
     if m.log_tail:
         for line in m.log_tail:
             if "PID worker:" in line:
@@ -1286,7 +1289,6 @@ async def cancel_job(job_id: str, user = Depends(require_admin)):
                     pid_to_kill = int(line.split("PID worker:")[1].strip())
                 except Exception:
                     pass
-    # Intentar leer job.log en la raíz
     if not pid_to_kill:
         try:
             log_key = _s3_key(job_id, LOG_KEY)
@@ -1299,7 +1301,6 @@ async def cancel_job(job_id: str, user = Depends(require_admin)):
                         pass
         except Exception:
             pass
-    # Compatibilidad con ruta antigua logs/job.log
     if not pid_to_kill:
         try:
             old_key = _s3_key(job_id, "logs/job.log")
@@ -1343,7 +1344,6 @@ def _require_s3_env():
     sk = os.getenv("AWS_SECRET_ACCESS_KEY")
     endpoint = os.getenv("S3_ENDPOINT")
     bucket = os.getenv("S3_BUCKET")
-    # Permitir cadena de credenciales de AWS (perfiles) si está configurada
     profile = os.getenv("AWS_PROFILE") or os.getenv("AWS_DEFAULT_PROFILE") or os.getenv("AWS_SHARED_CREDENTIALS_FILE")
     if (not ak or not sk) and not profile:
         raise HTTPException(status_code=500, detail={
@@ -1355,12 +1355,9 @@ def _require_s3_env():
             "reason": "s3_bucket_missing",
             "message": "Define S3_BUCKET en tu entorno o .env",
         })
-    # endpoint puede omitirse si usas AWS S3 estándar; si usas MinIO, debe estar
     insecure = os.getenv("S3_INSECURE")
     if endpoint is None and os.getenv("AWS_ENDPOINT_URL_S3") is None:
-        # Sin endpoint explícito: asumimos AWS S3; no forzamos error
         return
-    # endpoint presente, ok
     return
 
 

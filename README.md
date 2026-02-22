@@ -81,7 +81,10 @@ Notas
 - Si ya tienes una base MySQL externa, ajusta `DB_HOST`, `DB_PORT`, etc. y puedes omitir el servicio `db` en compose.
 
 Datos y SQL
-- Coloca el volcado completo en `data/casaos.sql` o impórtalo directo en tu MySQL. Consulta `data/README.md`.
+- Para inicialización automática con Docker (tablas + procedimientos + semilla), usa el script:
+  - `SOM3D-BACKEND/db/init/001_schema_seed.sql`
+  - Se monta en MariaDB como `/docker-entrypoint-initdb.d` desde el `docker-compose.yml` de la raíz.
+  - Nota: solo corre la primera vez (cuando el volumen `mariadb_data` está vacío). Para re-ejecutar: `docker compose down -v`.
 
 
 para el ec2 el env

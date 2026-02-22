@@ -1,4 +1,3 @@
-# NOTE: This file was synchronized from ClaseGenerator.py to ensure it includes the full class implementation.
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
@@ -6,18 +5,30 @@ import os, sys, time, shutil
 from pathlib import Path
 import numpy as np
 
-# ---- Opcional: activar modo "solo GPU" si hay CuPy ----
 _HAS_CUPY = False
 _cupy_ver = "unknown"
-GPU_ONLY_OTSU = False
-try:
-    os.environ.setdefault("CUPY_DONT_WARN_ON_CUDA_PATH", "1")
-    import cupy as cp
-    _HAS_CUPY = True
-    GPU_ONLY_OTSU = True
-    _cupy_ver = getattr(cp, "__version__", "unknown")
-except Exception:
-    pass
+_CUPY = None
+_CUPY_TRIED = False
+
+GPU_ONLY_OTSU = str(os.getenv("SOM3D_GPU_ONLY_OTSU", "false")).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def _get_cupy():
+    global _HAS_CUPY, _cupy_ver, _CUPY, _CUPY_TRIED
+    if _CUPY_TRIED:
+        return _CUPY
+    _CUPY_TRIED = True
+    try:
+        os.environ.setdefault("CUPY_DONT_WARN_ON_CUDA_PATH", "1")
+        import cupy as cp  # type: ignore
+        _CUPY = cp
+        _HAS_CUPY = True
+        _cupy_ver = getattr(cp, "__version__", "unknown")
+    except Exception:
+        _CUPY = None
+        _HAS_CUPY = False
+        _cupy_ver = "unavailable"
+    return _CUPY
 
 import nibabel as nib
 from skimage.filters import threshold_otsu, gaussian
@@ -41,7 +52,6 @@ except Exception:
 from stl import mesh as stlmesh
 
 
-# ------------------- Utilidades básicas -------------------
 
 def find_nii_files(root: Path, recursive: bool) -> list[Path]:
     pats = ["*.nii", "*.nii.gz"]
@@ -76,6 +86,9 @@ def _compute_otsu_cpu(vec_np: np.ndarray) -> float:
     return float(threshold_otsu(vec_np))
 
 def _compute_otsu_gpu_cupy(vec_cp: "cp.ndarray", bins: int = 4096) -> float:
+    cp = _get_cupy()
+    if cp is None:
+        raise RuntimeError("GPU Otsu requiere CuPy.")
     vec_cp = vec_cp.astype(cp.float32, copy=False)
     vmin, vmax = cp.min(vec_cp), cp.max(vec_cp)
     if not cp.isfinite(vmin) or not cp.isfinite(vmax) or vmin == vmax:
@@ -107,7 +120,9 @@ def mask_from_otsu_cpu(vol: np.ndarray, clip_min: float|None, clip_max: float|No
     return (data >= t), float(t)
 
 def mask_from_otsu_gpu_only(vol_np: np.ndarray, clip_min: float|None, clip_max: float|None, exclude_zeros: bool) -> tuple[np.ndarray, float]:
-    if not _HAS_CUPY: raise RuntimeError("GPU Otsu requiere CuPy.")
+    cp = _get_cupy()
+    if cp is None:
+        raise RuntimeError("GPU Otsu requiere CuPy.")
     data = cp.asarray(vol_np, dtype=cp.float32)
     if clip_min is not None or clip_max is not None:
         lo = -cp.inf if clip_min is None else clip_min
@@ -172,7 +187,6 @@ def _fmt_size(nbytes: int) -> str:
         return f"{nbytes} B"
 
 
-# --------------- Postproceso (PyMeshLab) ------------------
 
 def _suggest_target_faces(name: str, faces_before: int) -> int:
     n = name.lower()
@@ -362,7 +376,6 @@ def postprocess_with_meshlab(
     }
 
 
-# ----------------------- CLASE PRINCIPAL -----------------------
 
 class NiftiToSTLConverter:
     """
@@ -373,10 +386,8 @@ class NiftiToSTLConverter:
     """
 
     def __init__(self, *, progress_cb=None):
-        # progress_cb: Callable[[str], None] | None
         self.progress_cb = progress_cb or (lambda msg: print(msg, end=""))
 
-    # ---- API de alto nivel ----
     def convert_folder(
         self,
         input_dir: Path | str,
@@ -399,6 +410,8 @@ class NiftiToSTLConverter:
         total, successes = len(files), 0
         results: list[dict] = []
 
+        _get_cupy()
+
         originals_dir = output_dir / "originales"
         hq_dir = output_dir / "hq_suavizado_decimado"
 
@@ -417,7 +430,6 @@ class NiftiToSTLConverter:
                 spacing = voxel_spacing_from_affine(affine)
                 vol = _pre_smooth_volume(vol, spacing, f.name)
 
-                # --- OTSU (GPU-only si así quedó activado por presencia de CuPy) ---
                 if GPU_ONLY_OTSU:
                     if not _HAS_CUPY:
                         raise RuntimeError("Modo solo-GPU activo pero CuPy no está disponible.")
@@ -438,7 +450,6 @@ class NiftiToSTLConverter:
                 if voxels < int(min_voxels):
                     raise RuntimeError(f"Máscara muy pequeña: {voxels} < {min_voxels}")
 
-                # --- Marching Cubes ---
                 try:
                     if _HAS_VTK:
                         verts, faces = marching_cubes_cpu_vtk(mask_np, spacing)
@@ -449,7 +460,6 @@ class NiftiToSTLConverter:
                     verts, faces = marching_cubes_cpu_skimage(mask_np, spacing)
                     used_backend = "cpu(skimage)"
 
-                # --- STL original ---
                 out_stl_orig = originals_dir / (f.stem.replace(".nii", "") + ".stl")
                 _save_stl_numpy(verts, faces, out_stl_orig)
 
@@ -465,7 +475,6 @@ class NiftiToSTLConverter:
                 size_saving_pct = 0.0
                 method = f"otsu-{used_otsu} + MC({used_backend})"
 
-                # --- HQ: suavizado-only si ya es pequeña; si no, decimation + Taubin ---
                 skip_hq = (faces.shape[0] < 5000) or (stl_orig_bytes < 300 * 1024)
                 out_stl_hq = None
                 if _HAS_PYMESHLAB:
@@ -621,9 +630,7 @@ class NiftiToSTLConverter:
                     "message": str(exc), "seconds": f"{elapsed:.3f}",
                 })
 
-        # (Se eliminó la escritura de CSV: no se requiere)
 
-        # Resumen de tamaño total (opcional)
         try:
             tot_orig = sum(int(r["stl_size_bytes"]) for r in results if r.get("stl_size_bytes"))
             tot_hq   = sum(int(r["stl_reduced_size_bytes"]) for r in results if r.get("stl_reduced_size_bytes"))
@@ -644,7 +651,6 @@ class NiftiToSTLConverter:
             "elapsed_sec": total_elapsed
         }
 
-    # ---- API por archivo (por si la necesitas) ----
     def convert_file(
         self,
         nifti_path: Path | str,
@@ -665,16 +671,13 @@ class NiftiToSTLConverter:
             exclude_zeros=exclude_zeros, min_voxels=min_voxels,
         )["results"][0]
 
-    # ---- Helper de logging interno ----
     def _log(self, msg: str):
         try:
             self.progress_cb(msg)
         except Exception:
-            # Evitar que errores de callback rompan la conversión
             print(msg, end="")
 
 
-# ----------------------- Ejemplo de uso -----------------------
 if __name__ == "__main__":
     """
     Ejemplo:
@@ -694,7 +697,6 @@ if __name__ == "__main__":
     ap.add_argument("--clip-max", type=float, default=None)
     ap.add_argument("--include-zeros", action="store_true", help="No excluir ceros antes de Otsu")
     ap.add_argument("--min-voxels", type=int, default=10)
-    # (Se eliminó --log-name; no se genera CSV)
     args = ap.parse_args()
 
     conv = NiftiToSTLConverter()

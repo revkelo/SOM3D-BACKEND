@@ -1,4 +1,3 @@
-# NOTE: This file was synchronized from ClaseTotalsegmentor.py to ensure it includes the full class implementation.
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
@@ -21,7 +20,6 @@ from pathlib import Path
 from contextlib import contextmanager
 from typing import Callable, Optional, List, Dict, Tuple
 
-# ---------- Constantes ----------
 ORTHO_ROI: List[str] = [
     "skull","sacrum",
     "vertebrae_C1","vertebrae_C2","vertebrae_C3","vertebrae_C4","vertebrae_C5","vertebrae_C6","vertebrae_C7",
@@ -34,23 +32,19 @@ ORTHO_ROI: List[str] = [
     "humerus_left","humerus_right","femur_left","femur_right","hip_left","hip_right",
 ]
 
-# Tasks gestionados internamente por el runner (no deben repetirse como "extras")
 RESERVED_TASKS = {"total", "appendicular_bones", "thigh_shoulder_muscles", "hip_implant"}
 
 LICENSE_ENV_VARS: Tuple[str, ...] = ("TOTALSEG_LICENSE_KEY", "TOTALSEG_LICENSE")
 
-# Presets rápidos para flags directos
 TEETH_TASKS = ["teeth"]
 CRANIO_TASKS = ["craniofacial_structures"]
 
-# Afinar BLAS para no sobrecargar
 os.environ.setdefault("OMP_NUM_THREADS","1")
 os.environ.setdefault("OPENBLAS_NUM_THREADS","1")
 os.environ.setdefault("MKL_NUM_THREADS","1")
 os.environ.setdefault("NUMEXPR_NUM_THREADS","1")
 os.environ.setdefault("PYTHONUTF8","1")
 
-# ---------- Utils ----------
 def format_duration(seconds: float) -> str:
     total_ms = int(round(seconds * 1000))
     ms = total_ms % 1000
@@ -97,7 +91,6 @@ def merge_tasks(user_tasks: Optional[List[str]], add_tasks: Optional[List[str]])
         merged.append(t); seen.add(t)
     return merged
 
-# >>> NUEVO: util para borrar archivos por "stem" con .nii / .nii.gz
 def _delete_outputs_by_stem(out_dir: Path, stems: List[str], on_log: Callable[[str], None]) -> None:
     for stem in stems:
         for suffix in (".nii.gz", ".nii"):
@@ -109,19 +102,17 @@ def _delete_outputs_by_stem(out_dir: Path, stems: List[str], on_log: Callable[[s
                 except Exception as e:
                     on_log(f"[POST] WARN no se pudo borrar {p.name}: {e}")
 
-# ---------- Clase principal ----------
 class TotalSegmentatorRunner:
     def __init__(
         self,
         robust_import: bool = True,
 
-        # Toggles: por defecto SOLO ortopedia = True; los demás OFF
-        enable_ortopedia: bool = True,           # task=total con ORTHO_ROI
-        enable_appendicular: bool = False,       # task=appendicular_bones
-        enable_muscles: bool = False,            # task=thigh_shoulder_muscles
-        enable_hip_implant: bool = False,        # task=hip_implant
+        enable_ortopedia: bool = True,                                     
+        enable_appendicular: bool = False,                                
+        enable_muscles: bool = False,                                         
+        enable_hip_implant: bool = False,                          
 
-        extra_tasks: Optional[List[str]] = None, # p.ej. ["body","total_mr","teeth","craniofacial_structures"]
+        extra_tasks: Optional[List[str]] = None,                                                              
         on_log: Optional[Callable[[str], None]] = None
     ):
         self.robust_import = robust_import
@@ -130,7 +121,6 @@ class TotalSegmentatorRunner:
         self.enable_muscles = enable_muscles
         self.enable_hip_implant = enable_hip_implant
 
-        # Limpia, de-duplica y excluye reservados
         cleaned: List[str] = []
         seen = set()
         for t in (extra_tasks or []):
@@ -139,7 +129,6 @@ class TotalSegmentatorRunner:
                 continue
             cleaned.append(t); seen.add(t)
 
-        # >>> NUEVO: asegurar orden: primero cranio, después teeth (si ambos existen)
         def _reorder_extras(lst: List[str]) -> List[str]:
             has_cranio = "craniofacial_structures" in lst
             has_teeth  = "teeth" in lst
@@ -156,7 +145,6 @@ class TotalSegmentatorRunner:
         self.dev_info = self._detect_device_once()
         self._license_checked = False
 
-    # ---------- Logging ----------
     def _log(self, msg: str) -> None:
         self.on_log(msg)
 
@@ -178,7 +166,6 @@ class TotalSegmentatorRunner:
             self._flag(self.on_log, label, "ERROR", f"{e} | dur={format_duration(dt)}")
             raise
 
-    # ---------- Device ----------
     @staticmethod
     def _detect_device_once() -> Dict[str, object]:
         info = {
@@ -258,7 +245,6 @@ class TotalSegmentatorRunner:
             self._flag(self.on_log, "LICENSE", "Respuesta", message)
         self._license_checked = True
 
-    # ---------- DICOM helpers ----------
     @staticmethod
     def _split_series(input_dir: Path, on_log: Callable[[str], None]) -> Dict[str, List[Path]]:
         try:
@@ -309,7 +295,7 @@ class TotalSegmentatorRunner:
                         ds = dcm.dcmread(str(f), force=True)
                         ts = ds.file_meta.TransferSyntaxUID
                         if getattr(ts, 'is_compressed', False):
-                            _ = ds.pixel_array  # fuerza decodificación
+                            _ = ds.pixel_array                         
                             ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
                             ds.is_implicit_VR = False; ds.is_little_endian = True
                         dst = out_dir / f"{count:05d}.dcm"
@@ -357,7 +343,6 @@ class TotalSegmentatorRunner:
             if not nii: raise RuntimeError("Conversión DICOM→NIfTI falló.")
             return nii
 
-    # ---------- Threads ----------
     @staticmethod
     def _suggest_threads(dev_info: dict) -> Tuple[int,int]:
         cpu_count = max(os.cpu_count() or 2, 2)
@@ -371,7 +356,6 @@ class TotalSegmentatorRunner:
         n = min(max(cpu_count // 2, 2), 8)
         return (n, n)
 
-    # ---------- TotalSegmentator runner ----------
     _ansi_re = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
     @classmethod
@@ -414,7 +398,6 @@ class TotalSegmentatorRunner:
 
     @staticmethod
     def _build_cmd_gpu(input_nii: Path, output_dir: Path, task: str, extra_flags: List[str]) -> List[str]:
-        # Sin --fast
         return ["TotalSegmentator","-i",str(input_nii),"-o",str(output_dir),"--task",task,"--device","gpu", *extra_flags]
 
     @staticmethod
@@ -432,7 +415,6 @@ class TotalSegmentatorRunner:
         env.setdefault("PYTHONUTF8", "1")
         env.setdefault("TQDM_DISABLE", "1")
 
-        # 1) Intento GPU
         cmd_gpu = self._build_cmd_gpu(input_nii, output_dir, task, extra_flags)
         with self._step("TS|GPU", f"Ejecución {task}"):
             self._flag(self.on_log, "TS|GPU", "cmd", " ".join(shlex.quote(x) for x in cmd_gpu))
@@ -441,7 +423,6 @@ class TotalSegmentatorRunner:
         if rc == 0:
             return rc
 
-        # 2) Fallback CPU
         self._flag(self.on_log, "TS|GPU", f"rc={rc}", f"Fallback a CPU ({task})")
         cmd_cpu = self._build_cmd_cpu(input_nii, output_dir, task, extra_flags)
         with self._step("TS|CPU", f"Ejecución {task}"):
@@ -450,7 +431,6 @@ class TotalSegmentatorRunner:
             self._flag(self.on_log, "TS|CPU", "rc", str(rc2))
             return rc2
 
-    # ---------- Stats ----------
     def _merge_and_cleanup_stats(self, out_dir: Path) -> None:
         out_dir = Path(out_dir)
         stats = out_dir / "statistics.json"
@@ -476,7 +456,6 @@ class TotalSegmentatorRunner:
         except Exception:
             pass
 
-    # >>> NUEVO: post-proceso específico para cranio
     def _postprocess_cranio_outputs(self, out_dir: Path, will_run_teeth: bool) -> None:
         """
         Reglas:
@@ -490,7 +469,6 @@ class TotalSegmentatorRunner:
             stems += ["teeth_lower", "teeth_upper"]
         _delete_outputs_by_stem(out_dir, stems, self.on_log)
 
-    # ---------- Preflight & tmp ----------
     def _preflight_or_fail(self) -> None:
         with self._step("START", "Preflight"):
             if not shutil.which("TotalSegmentator"):
@@ -516,7 +494,6 @@ class TotalSegmentatorRunner:
         base.mkdir(parents=True, exist_ok=True)
         return base
 
-    # ---------- API principal ----------
     def run(self, input_path: Path, output_path: Path) -> float:
         """
         Pipeline con toggles:
@@ -531,7 +508,6 @@ class TotalSegmentatorRunner:
         ensure_dir(output_path)
         log_file = output_path / "run.log"
 
-        # logger que duplica a archivo
         base_logger = self.on_log
         def tee_log(msg: str):
             try:
@@ -544,7 +520,6 @@ class TotalSegmentatorRunner:
             except Exception:
                 pass
 
-        # sustituir temporalmente el logger
         original_logger = self.on_log
         self.on_log = tee_log
 
@@ -590,9 +565,7 @@ class TotalSegmentatorRunner:
                 flags_common = ["--nr_thr_resamp",str(n_resamp),"--nr_thr_saving",str(n_saving)]
                 self._flag(self.on_log, "THREADS", "resample/saving", f"{n_resamp}/{n_saving}")
 
-            # 1) ORTOPEDIA (por defecto ON)
             if self.enable_ortopedia:
-                # Si también se ejecutará CRANIO, evitar generar 'skull' en ORTOPEDIA
                 roi_subset = list(ORTHO_ROI)
                 if "craniofacial_structures" in self.extra_tasks and "skull" in roi_subset:
                     try:
@@ -612,7 +585,6 @@ class TotalSegmentatorRunner:
             else:
                 self._flag(self.on_log, "TS", "ORTOPEDIA", "Deshabilitado")
 
-            # 2) MÚSCULOS (opcional)
             if self.enable_muscles:
                 tsm_flags = list(flags_common)
                 self._flag(self.on_log, "TS", "Resumen THIGH_SHOULDER_MUSCLES", f"task=thigh_shoulder_muscles | stats=ON")
@@ -626,7 +598,6 @@ class TotalSegmentatorRunner:
             else:
                 self._flag(self.on_log, "TS", "THIGH_SHOULDER_MUSCLES", "Deshabilitado")
 
-            # 3) APPENDICULAR (opcional)
             if self.enable_appendicular:
                 app_flags = list(flags_common)
                 self._flag(self.on_log, "TS", "Resumen APPENDICULAR", f"task=appendicular_bones | stats=ON")
@@ -640,7 +611,6 @@ class TotalSegmentatorRunner:
             else:
                 self._flag(self.on_log, "TS", "APPENDICULAR", "Deshabilitado")
 
-            # 4) HIP_IMPLANT (opcional)
             if self.enable_hip_implant:
                 hip_flags = list(flags_common)
                 self._flag(self.on_log, "TS", "Resumen HIP_IMPLANT", f"task=hip_implant | stats=ON")
@@ -654,8 +624,6 @@ class TotalSegmentatorRunner:
             else:
                 self._flag(self.on_log, "TS", "HIP_IMPLANT", "Deshabilitado")
 
-            # 5) Extras
-            # NOTA: con el reordenado, si hay cranio y teeth, cranio va primero y luego teeth.
             will_run_teeth = ("teeth" in self.extra_tasks)
             for tname in self.extra_tasks:
                 extra_flags = list(flags_common)
@@ -668,12 +636,10 @@ class TotalSegmentatorRunner:
                 self._flag(self.on_log, f"END|{tname}", "Duración", format_duration(t_ex))
                 self._merge_and_cleanup_stats(output_path)
 
-                # Limpieza específica para cranio
                 if tname == "craniofacial_structures":
                     self._postprocess_cranio_outputs(output_path, will_run_teeth)
 
         finally:
-            # Limpieza de temporales
             with self._step("CLEANUP", "Eliminando temporales"):
                 if temp_mount:
                     try:
@@ -688,13 +654,11 @@ class TotalSegmentatorRunner:
             self._flag(self.on_log, "END", "Duración total", format_duration(elapsed_total))
             self._flag(self.on_log, "END", "Listo", "Ver también run.log")
 
-            # restaurar logger original
             self.on_log = original_logger
 
         return elapsed_total
 
 
-# ---------- Main de ejemplo ----------
 if __name__ == "__main__":
     import argparse
 
@@ -706,8 +670,6 @@ if __name__ == "__main__":
     parser.add_argument("--no-robust", action="store_true",
                         help="Desactivar importación robusta (requiere NIfTI)")
 
-    # --- Toggles ---
-    # ORTOPEDIA (ON por defecto)
     orto_group = parser.add_mutually_exclusive_group()
     orto_group.add_argument("--ortopedia", dest="ortopedia", action="store_true",
                             help="Habilitar ORTOPEDIA (por defecto ON)")
@@ -715,7 +677,6 @@ if __name__ == "__main__":
                             help="Deshabilitar ORTOPEDIA")
     parser.set_defaults(ortopedia=True)
 
-    # MÚSCULOS (OFF por defecto)
     musc_group = parser.add_mutually_exclusive_group()
     musc_group.add_argument("--muscles", dest="muscles", action="store_true",
                             help="Habilitar THIGH_SHOULDER_MUSCLES (por defecto OFF)")
@@ -723,7 +684,6 @@ if __name__ == "__main__":
                             help="Deshabilitar THIGH_SHOULDER_MUSCLES")
     parser.set_defaults(muscles=False)
 
-    # APPENDICULAR (OFF por defecto)
     app_group = parser.add_mutually_exclusive_group()
     app_group.add_argument("--appendicular", dest="appendicular", action="store_true",
                            help="Habilitar APPENDICULAR (por defecto OFF)")
@@ -731,7 +691,6 @@ if __name__ == "__main__":
                            help="Deshabilitar APPENDICULAR")
     parser.set_defaults(appendicular=False)
 
-    # HIP_IMPLANT (OFF por defecto)
     hip_group = parser.add_mutually_exclusive_group()
     hip_group.add_argument("--hip-implant", dest="hip_implant", action="store_true",
                            help="Habilitar HIP_IMPLANT (por defecto OFF)")
@@ -739,11 +698,9 @@ if __name__ == "__main__":
                            help="Deshabilitar HIP_IMPLANT")
     parser.set_defaults(hip_implant=False)
 
-    # Tasks extra (repetible):
     parser.add_argument("--task", dest="tasks", action="append", default=[],
                         help="Task extra (repetible), sin --fast. Se ignoran los tasks reservados.")
 
-    # Flags directos (sin 'modo'): dientes / cráneo
     parser.add_argument("--teeth", action="store_true",
                         help="Añade task 'teeth' (segmentación dental).")
     parser.add_argument("--cranio", action="store_true",
@@ -754,7 +711,6 @@ if __name__ == "__main__":
     def server_log(line: str):
         print(line, flush=True)
 
-    # Construir lista final de tasks extra (merge sin duplicados ni reservados)
     add_tasks: List[str] = []
     if args.teeth:
         add_tasks += TEETH_TASKS
